@@ -1,0 +1,21 @@
+[package]
+name = "trainticket_graph"
+version = "1.0.0"
+edition = "2024"
+description = "Предсказание графа исполнения Train Ticket без запуска приложения"
+publish = false
+
+[[bin]]
+name = "your_solution"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std", "alloc"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+indexmap = "2.14.2"
+regex = "1.13.1"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+
+[profile.release]
+opt-level = 3
+debug = false

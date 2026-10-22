@@ -1,0 +1,1 @@
+H:\OneDrive\Рабочий\ стол\Semantic\ graph\rust\target\release\astdump.exe: H:\OneDrive\Рабочий\ стол\Semantic\ graph\rust\src\bin\astdump.rs H:\OneDrive\Рабочий\ стол\Semantic\ graph\rust\src\jparse.rs H:\OneDrive\Рабочий\ стол\Semantic\ graph\rust\src\lib.rs
