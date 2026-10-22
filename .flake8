@@ -1,0 +1,20 @@
+[flake8]
+max-line-length = 79
+max-doc-length = 79
+# E203 и W503 противоречат форматированию black.
+extend-ignore = E203, W503
+docstring-convention = pep257
+exclude =
+    .git,
+    __pycache__,
+    targets,
+    platform,
+    probes,
+    examples,
+    gold,
+    scenarios,
+    skeleton,
+    context
+per-file-ignores =
+    # Тесты описываются именами функций, докстринги им не нужны.
+    tests/*: D103

@@ -1,26 +1,53 @@
-"""Внутренние вызовы с ответом status=0 / HTTP>=400: python failing.py S1 [S2 ...]"""
-import sys, os, json, copy, threading
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from solve import *
-import web as W
-from values import *
-def main():
-    proj = Project('skeleton/trainticket.json.gz', 'targets/trainticket')
-    tables0 = dbm.parse_dump('context/db-after-warmup.sql.gz')
-    for sid in sys.argv[1:]:
-        S = load_json(f'scenarios/{sid}.json')
-        out = []
-        oserve = W.Web.serve
-        def serve(self, module, mi, ci, pvars, query, body, caller, headers=None):
-            r = oserve(self, module, mi, ci, pvars, query, body, caller, headers)
-            b = r.f.get('body') if isinstance(r, LibObj) else None
-            code = r.f['status'].f.get('code') if isinstance(r, LibObj) and isinstance(r.f.get('status'), LibObj) else None
-            if (isinstance(b, dict) and b.get('status') == 0) or (code and code >= 400):
-                out.append(f"{'  <-' + caller.cls.name + '#' + caller.name if caller else 'ENTRY'} => {ci.name}#{mi.name} code={code} msg={b.get('msg') if isinstance(b, dict) else None}")
-            return r
-        W.Web.serve = serve
-        it, cl, errors = run_scenario(proj, tables0, S)
-        W.Web.serve = oserve
-        print('=====', sid)
-        for o in out: print('  ', o)
-th = threading.Thread(target=main); threading.stack_size(64*1024*1024); th = threading.Thread(target=main); th.start(); th.join()
+"""Печатает внутренние вызовы сервисов, закончившиеся отказом.
+
+Отказ — ответ ``status = 0`` или HTTP-код от 400. Запуск::
+
+    python -m solution.tools.failing S1 [S2 …]
+"""
+
+import sys
+
+from .. import web
+from ..values import LibObj
+from .common import in_big_stack, run
+
+
+def collect(sid):
+    """Выполняет сценарий и возвращает строки с отказами."""
+    out = []
+    orig_serve = web.Web.serve
+
+    def serve(self, module, mi, ci, pvars, query, body, caller, *rest):
+        r = orig_serve(self, module, mi, ci, pvars, query, body, caller, *rest)
+        resp_body = r.f.get("body") if isinstance(r, LibObj) else None
+        status = r.f.get("status") if isinstance(r, LibObj) else None
+        code = status.f.get("code") if isinstance(status, LibObj) else None
+        failed_body = (
+            isinstance(resp_body, dict) and resp_body.get("status") == 0
+        )
+        if failed_body or (code and code >= 400):
+            src = "ENTRY"
+            if caller:
+                src = f"<- {caller.cls.name}#{caller.name}"
+            msg = resp_body.get("msg") if isinstance(resp_body, dict) else None
+            out.append(f"{src} => {ci.name}#{mi.name} code={code} msg={msg}")
+        return r
+
+    web.Web.serve = serve
+    try:
+        run(sid)
+    finally:
+        web.Web.serve = orig_serve
+    return out
+
+
+def main(argv):
+    """Печатает отказы для каждого сценария из аргументов."""
+    for sid in argv:
+        print("=====", sid)
+        for line in in_big_stack(collect, sid):
+            print("  ", line)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

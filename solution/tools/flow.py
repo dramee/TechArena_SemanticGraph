@@ -1,40 +1,68 @@
-"""Печать дерева выполнения шага сценария: python _flow.py S1 <n шага|all> [maxdepth]"""
-import sys, os, json, threading
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from solve import *
-import interp as I
-import web as W
-from values import *
+"""Печатает дерево вызовов методов по шагам сценария.
 
-def main():
-    sid = sys.argv[1]; which = sys.argv[2]; maxd = int(sys.argv[3]) if len(sys.argv) > 3 else 99
-    proj = Project('skeleton/trainticket.json.gz', 'targets/trainticket')
-    tables0 = dbm.parse_dump('context/db-after-warmup.sql.gz')
-    S = load_json(f'scenarios/{sid}.json')
+Запуск::
+
+    python -m solution.tools.flow S1 [номер шага | all] [глубина]
+"""
+
+import sys
+
+from .. import interp, web
+from ..scenario import Client
+from .common import in_big_stack, run
+
+
+def collect(sid, max_depth):
+    """Выполняет сценарий и возвращает строки дерева вызовов."""
     out = []
-    oinv = I.Interp.invoke
-    def inv(self, mi, this, args, caller):
-        d = len(self.stack)
-        if d <= maxd:
-            out.append("  " * d + f"{mi.cls.name}#{mi.name}  [{mi.cls.module.replace('ts-','').replace('-service','')}]")
-        return oinv(self, mi, this, args, caller)
-    I.Interp.invoke = inv
-    oserve = W.Web.serve
-    def serve(self, module, mi, ci, pvars, query, body, caller, headers=None):
-        out.append("  " * len(self.it.stack) + f"==> REMOTE {module} {ci.name}#{mi.name}")
-        return oserve(self, module, mi, ci, pvars, query, body, caller, headers)
-    W.Web.serve = serve
-    tables = copy.deepcopy(tables0)
-    it = I.Interp(proj, tables); Repos(it); Web(it)
-    cl = Client(it, S)
-    for st in S['steps']:
-        out.append(f"##### STEP {st['n']}: {st['action']}")
-        try: cl.step(st['n'], st['action'])
-        except Exception as e: out.append("!!! " + repr(e)[:200])
-        out.append("  -> " + str(cl.log[-1])[:200])
-    txt = "\n".join(out)
-    if which != 'all':
-        parts = txt.split("##### STEP ")
-        txt = "\n".join("##### STEP " + p for p in parts if p.startswith(which + ":"))
-    print(txt)
-th = threading.Thread(target=main); threading.stack_size(64*1024*1024); th = threading.Thread(target=main); th.start(); th.join()
+    orig_invoke = interp.Interp.invoke
+    orig_serve = web.Web.serve
+    orig_step = Client.step
+
+    def invoke(self, mi, this, args, caller):
+        depth = len(self.stack)
+        if depth <= max_depth:
+            module = mi.cls.module.replace("ts-", "").replace("-service", "")
+            out.append("  " * depth + f"{mi.cls.name}#{mi.name}  [{module}]")
+        return orig_invoke(self, mi, this, args, caller)
+
+    def serve(self, module, mi, ci, *args, **kwargs):
+        indent = "  " * len(self.it.stack)
+        out.append(f"{indent}==> REMOTE {module} {ci.name}#{mi.name}")
+        return orig_serve(self, module, mi, ci, *args, **kwargs)
+
+    def step(self, n, text):
+        out.append(f"##### STEP {n}: {text}")
+        result = orig_step(self, n, text)
+        out.append("  -> " + str(self.log[-1] if self.log else None)[:200])
+        return result
+
+    interp.Interp.invoke = invoke
+    web.Web.serve = serve
+    Client.step = step
+    try:
+        run(sid)
+    finally:
+        interp.Interp.invoke = orig_invoke
+        web.Web.serve = orig_serve
+        Client.step = orig_step
+    return out
+
+
+def main(argv):
+    """Разбирает аргументы и печатает дерево."""
+    sid = argv[0]
+    which = argv[1] if len(argv) > 1 else "all"
+    max_depth = int(argv[2]) if len(argv) > 2 else 99
+    lines = in_big_stack(collect, sid, max_depth)
+    text = "\n".join(lines)
+    if which != "all":
+        parts = text.split("##### STEP ")
+        text = "\n".join(
+            "##### STEP " + p for p in parts if p.startswith(which + ":")
+        )
+    print(text)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -1,10 +1,38 @@
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from driver import *
-proj, it = build()
-w = it.web
-rows = []
-for module, hs in sorted(w.handlers.items()):
-    for v, tpl, mi, ci in hs:
-        rows.append((module.replace('ts-','').replace('-service',''), v or '*', '/'+'/'.join(tpl), ci.name+'#'+mi.name))
-for r in rows: print(*r, sep=' | ')
+"""Печатает REST-обработчики сервисов: метод, путь, класс и параметры.
+
+Запуск::
+
+    python -m solution.tools.handlers [фрагмент имени модуля …]
+"""
+
+import sys
+
+from .common import in_big_stack, run
+
+
+def collect(filters):
+    """Возвращает строки описания обработчиков."""
+    it, _client, _errors = run({"id": "X", "steps": []})
+    rows = []
+    for module, handlers in sorted(it.web.handlers.items()):
+        if filters and not any(f in module for f in filters):
+            continue
+        for verb, tpl, mi, ci in handlers:
+            params = ", ".join(p[1] for p in mi.params)
+            name = module.replace("ts-", "").replace("-service", "")
+            path = "/" + "/".join(tpl)
+            rows.append(
+                f"{name} | {verb or '*'} | {path} | "
+                f"{ci.name}#{mi.name}({params})"
+            )
+    return rows
+
+
+def main(argv):
+    """Печатает обработчики выбранных модулей."""
+    for line in in_big_stack(collect, argv):
+        print(line)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

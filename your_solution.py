@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""TechArena: предсказание графа исполнения Train Ticket без запуска приложения.
+"""TechArena: предсказание графа исполнения Train Ticket без его запуска.
 
-    python3 your_solution.py skeleton/trainticket.json.gz targets/trainticket scenarios/*.json -o submission.json
+Запуск::
 
-Подробности — в SOLUTION.md. Код решения — в каталоге solution/ (только стандартная библиотека Python 3.8+)."""
-import os, sys
+    python3 your_solution.py skeleton/trainticket.json.gz \
+        targets/trainticket scenarios/*.json -o submission.json
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "solution"))
-import solve
+Подробности — в SOLUTION.md, код решения — в пакете ``solution``
+(только стандартная библиотека Python).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from solution.solve import run_main  # noqa: E402
 
 if __name__ == "__main__":
-    solve.run_main()
+    run_main()

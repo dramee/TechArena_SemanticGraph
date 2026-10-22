@@ -1,0 +1,20 @@
+[project]
+name = "trainticket-semantic-graph"
+version = "1.0.0"
+description = "Предсказание графа исполнения Train Ticket без запуска приложения"
+requires-python = ">=3.8"
+dependencies = []
+
+[tool.black]
+line-length = 79
+target-version = ["py38"]
+extend-exclude = "^/(targets|platform|probes|examples|gold|scenarios|skeleton|context)/"
+
+[tool.isort]
+profile = "black"
+line_length = 79
+known_first_party = ["solution"]
+skip_glob = ["targets/*", "platform/*", "probes/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

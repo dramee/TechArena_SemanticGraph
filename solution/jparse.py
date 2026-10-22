@@ -1,47 +1,124 @@
 """Лёгкий парсер Java 8 (подмножество, достаточное для проекта Train Ticket).
 
-Даёт AST методов с позициями вызовов (line, col) — они совпадают с call_site-вершинами скелета:
+Даёт AST методов с позициями вызовов (line, col) — они совпадают с
+call_site-вершинами скелета:
     - вызов метода: позиция имени метода;
     - new X(...): позиция слова `new`.
 Только стандартная библиотека Python.
 """
+
 import re
 
 KEYWORDS = {
-    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const", "continue",
-    "default", "do", "double", "else", "enum", "extends", "final", "finally", "float", "for", "goto", "if",
-    "implements", "import", "instanceof", "int", "interface", "long", "native", "new", "package", "private",
-    "protected", "public", "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this",
-    "throw", "throws", "transient", "try", "void", "volatile", "while", "true", "false", "null",
+    "abstract",
+    "assert",
+    "boolean",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "class",
+    "const",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extends",
+    "final",
+    "finally",
+    "float",
+    "for",
+    "goto",
+    "if",
+    "implements",
+    "import",
+    "instanceof",
+    "int",
+    "interface",
+    "long",
+    "native",
+    "new",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "short",
+    "static",
+    "strictfp",
+    "super",
+    "switch",
+    "synchronized",
+    "this",
+    "throw",
+    "throws",
+    "transient",
+    "try",
+    "void",
+    "volatile",
+    "while",
+    "true",
+    "false",
+    "null",
 }
 PRIMS = {"boolean", "byte", "char", "short", "int", "long", "float", "double"}
-MODIFIERS = {"public", "private", "protected", "static", "final", "abstract", "native", "synchronized",
-             "transient", "volatile", "strictfp", "default"}
+MODIFIERS = {
+    "public",
+    "private",
+    "protected",
+    "static",
+    "final",
+    "abstract",
+    "native",
+    "synchronized",
+    "transient",
+    "volatile",
+    "strictfp",
+    "default",
+}
 
-TOKEN_RE = re.compile(r"""
+TOKEN_RE = re.compile(
+    r"""
     (?P<ws>[ \t\r\f]+)
   | (?P<nl>\n)
   | (?P<lc>//[^\n]*)
   | (?P<bc>/\*.*?\*/)
   | (?P<str>"(?:\\.|[^"\\\n])*")
   | (?P<chr>'(?:\\.|[^'\\\n])+')
-  | (?P<num>0[xX][0-9a-fA-F_]+[lL]?|\d[\d_]*\.?\d*(?:[eE][+-]?\d+)?[fFdDlL]?|\.\d[\d_]*(?:[eE][+-]?\d+)?[fFdD]?)
+  | (?P<num>0[xX][0-9a-fA-F_]+[lL]?
+        |\d[\d_]*\.?\d*(?:[eE][+-]?\d+)?[fFdDlL]?
+        |\.\d[\d_]*(?:[eE][+-]?\d+)?[fFdD]?)
   | (?P<id>[A-Za-z_$][A-Za-z_$0-9]*)
-  | (?P<op>>>>=|<<=|>>=|>>>|\.\.\.|->|::|\+\+|--|&&|\|\||==|!=|<=|>=|\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<|>>|[{}()\[\];,.@=<>!~?:+\-*/&|^%])
-""", re.X | re.S)
+  | (?P<op>>>>=|<<=|>>=|>>>|\.\.\.|->|::|\+\+|--|&&|\|\||==|!=|<=|>=
+        |\+=|-=|\*=|/=|%=|&=|\|=|\^=|<<|>>
+        |[{}()\[\];,.@=<>!~?:+\-*/&|^%])
+""",
+    re.X | re.S,
+)
 
 
 class Tok:
+    """Лексема: вид, текст и позиция в исходнике."""
+
     __slots__ = ("k", "t", "line", "col")
 
     def __init__(self, k, t, line, col):
+        """Создаёт лексему вида ``k`` с текстом ``t`` в позиции line:col."""
         self.k, self.t, self.line, self.col = k, t, line, col
 
     def __repr__(self):
+        """Возвращает ``текст@строка:колонка``."""
         return f"{self.t}@{self.line}:{self.col}"
 
 
 def tokenize(src):
+    """Разбивает исходный текст Java на лексемы с позициями.
+
+    Пробелы и комментарии отбрасываются, в конце добавляется лексема ``eof``.
+    """
     toks, line, ls, pos, n = [], 1, 0, 0, len(src)
     while pos < n:
         m = TOKEN_RE.match(src, pos)
@@ -52,15 +129,19 @@ def tokenize(src):
         text = m.group()
         col = pos - ls + 1
         if kind == "nl":
-            line += 1; ls = m.end()
+            line += 1
+            ls = m.end()
         elif kind == "bc":
             nls = text.count("\n")
             if nls:
-                line += nls; ls = pos + text.rfind("\n") + 1
+                line += nls
+                ls = pos + text.rfind("\n") + 1
         elif kind in ("ws", "lc"):
             pass
         elif kind == "id":
-            toks.append(Tok("kw" if text in KEYWORDS else "id", text, line, col))
+            toks.append(
+                Tok("kw" if text in KEYWORDS else "id", text, line, col)
+            )
         else:
             toks.append(Tok(kind, text, line, col))
         pos = m.end()
@@ -68,30 +149,44 @@ def tokenize(src):
     return toks
 
 
-# --------------------------------------------------------------------------------------- AST
+# ---------------------------------------------------------------------------------------
+# AST
 class Node:
+    """Базовый класс узлов AST."""
+
     __slots__ = ()
 
     def __repr__(self):
-        return f"{type(self).__name__}(" + ", ".join(f"{s}={getattr(self, s, None)!r}" for s in self.__slots__) + ")"
+        """Возвращает имя узла и значения всех полей."""
+        return (
+            f"{type(self).__name__}("
+            + ", ".join(
+                f"{s}={getattr(self, s, None)!r}" for s in self.__slots__
+            )
+            + ")"
+        )
 
 
 def _mk(name, fields):
     cls = type(name, (Node,), {"__slots__": tuple(fields.split())})
+
     def init(self, *a, **kw):
         for s, v in zip(cls.__slots__, a):
             setattr(self, s, v)
-        for s in cls.__slots__[len(a):]:
+        for s in cls.__slots__[len(a) :]:
             setattr(self, s, kw.get(s))
+
     cls.__init__ = init
     return cls
 
 
 # выражения
-Lit = _mk("Lit", "kind val")                      # kind: int,float,str,char,bool,null
+Lit = _mk("Lit", "kind val")  # kind: int,float,str,char,bool,null
 Name = _mk("Name", "id line col")
 FieldAcc = _mk("FieldAcc", "obj name line col")
-Call = _mk("Call", "obj name args line col")      # obj None -> неявный this/статический импорт
+Call = _mk(
+    "Call", "obj name args line col"
+)  # obj None -> неявный this/статический импорт
 New = _mk("New", "type args body line col outer")
 NewArray = _mk("NewArray", "type dims init")
 ArrayLit = _mk("ArrayLit", "elems")
@@ -108,10 +203,12 @@ MethodRef = _mk("MethodRef", "obj name")
 This = _mk("This", "")
 Super = _mk("Super", "")
 ClassLit = _mk("ClassLit", "type")
-TypeExpr = _mk("TypeExpr", "type")               # имя типа в позиции выражения (статическая цель)
+TypeExpr = _mk(
+    "TypeExpr", "type"
+)  # имя типа в позиции выражения (статическая цель)
 # операторы
 Block = _mk("Block", "stmts line")
-LocalVar = _mk("LocalVar", "type decls line")     # decls: [(name, init)]
+LocalVar = _mk("LocalVar", "type decls line")  # decls: [(name, init)]
 ExprStmt = _mk("ExprStmt", "e line")
 If = _mk("If", "c then els line")
 While = _mk("While", "c body line")
@@ -122,8 +219,10 @@ Return = _mk("Return", "e line")
 Throw = _mk("Throw", "e line")
 Break = _mk("Break", "label")
 Continue = _mk("Continue", "label")
-Try = _mk("Try", "res body catches fin line")     # catches: [(types, name, block)]
-Switch = _mk("Switch", "e cases line")            # cases: [(labels|None, [stmts])]
+Try = _mk(
+    "Try", "res body catches fin line"
+)  # catches: [(types, name, block)]
+Switch = _mk("Switch", "e cases line")  # cases: [(labels|None, [stmts])]
 Sync = _mk("Sync", "e body")
 Labeled = _mk("Labeled", "label stmt")
 LocalClass = _mk("LocalClass", "decl")
@@ -131,19 +230,29 @@ Assert = _mk("Assert", "c m")
 Empty = _mk("Empty", "")
 # декларации
 Param = _mk("Param", "type name annots varargs")
-Annot = _mk("Annot", "name args")                 # args — исходный текст внутри скобок
-MethodDecl = _mk("MethodDecl", "name params ret body mods annots line end cls ctor tparams start")
+Annot = _mk("Annot", "name args")  # args — исходный текст внутри скобок
+MethodDecl = _mk(
+    "MethodDecl",
+    "name params ret body mods annots line end cls ctor tparams start",
+)
 FieldDecl = _mk("FieldDecl", "type name init mods annots line cls")
-ClassDecl = _mk("ClassDecl", "kind name mods annots ext impls fields methods inits inner enums line end outer anon fqn tparams")
+ClassDecl = _mk(
+    "ClassDecl",
+    "kind name mods annots ext impls fields methods inits inner enums"
+    " line end outer anon fqn tparams",
+)
 EnumConst = _mk("EnumConst", "name args body line")
 
 
 class ParseError(Exception):
-    pass
+    """Ошибка разбора исходного файла Java."""
 
 
 class Parser:
+    """Рекурсивный разборщик Java 8: файл -> объявления классов с AST."""
+
     def __init__(self, src, path=""):
+        """Готовит разбор исходного текста ``src`` из файла ``path``."""
         self.toks = tokenize(src)
         self.i = 0
         self.path = path
@@ -155,20 +264,29 @@ class Parser:
     # ---------------------------------------------------------------- utils
     @property
     def tok(self):
+        """Текущая лексема."""
         return self.toks[self.i]
 
     def peek(self, k=1):
+        """Возвращает лексему на ``k`` позиций впереди текущей."""
         j = self.i + k
         return self.toks[j] if j < len(self.toks) else self.toks[-1]
 
     def at(self, t):
-        return self.toks[self.i].t == t and self.toks[self.i].k in ("op", "kw", "id")
+        """Проверяет, что текущая лексема — оператор или слово ``t``."""
+        return self.toks[self.i].t == t and self.toks[self.i].k in (
+            "op",
+            "kw",
+            "id",
+        )
 
     def at_op(self, t):
+        """Проверяет, что текущая лексема — оператор ``t``."""
         x = self.toks[self.i]
         return x.k == "op" and x.t == t
 
     def accept(self, t):
+        """Пропускает лексему ``t``, если она текущая; сообщает, была ли."""
         x = self.toks[self.i]
         if x.t == t and x.k in ("op", "kw", "id"):
             self.i += 1
@@ -176,21 +294,32 @@ class Parser:
         return False
 
     def expect(self, t):
+        """Пропускает обязательную лексему ``t`` или бросает ParseError."""
         x = self.toks[self.i]
         if x.t != t or x.k not in ("op", "kw", "id"):
-            raise ParseError(f"{self.path}:{x.line}:{x.col}: ожидалось {t!r}, найдено {x.t!r}")
+            raise ParseError(
+                f"{self.path}:{x.line}:{x.col}: "
+                f"ожидалось {t!r}, найдено {x.t!r}"
+            )
         self.i += 1
         return x
 
     def ident(self):
+        """Читает идентификатор или бросает ParseError."""
         x = self.toks[self.i]
         if x.k != "id":
-            raise ParseError(f"{self.path}:{x.line}:{x.col}: ожидался идентификатор, найдено {x.t!r}")
+            raise ParseError(
+                f"{self.path}:{x.line}:{x.col}: "
+                f"ожидался идентификатор, найдено {x.t!r}"
+            )
         self.i += 1
         return x.t
 
     def split_gt(self):
-        """Разбить составной токен '>>', '>>>', '>=', '>>=' перед закрытием списка типовых аргументов."""
+        """Отделяет ``>`` от составной лексемы (``>>``, ``>>>``, ``>=``).
+
+        Нужно перед закрытием списка аргументов типа: ``List<List<T>>``.
+        """
         x = self.toks[self.i]
         if x.k == "op" and x.t.startswith(">") and len(x.t) > 1:
             rest = Tok("op", x.t[1:], x.line, x.col + 1)
@@ -198,6 +327,7 @@ class Parser:
             self.toks.insert(self.i + 1, rest)
 
     def skip_balanced(self, open_, close):
+        """Пропускает группу лексем от ``open_`` до парной ``close``."""
         depth = 0
         while True:
             x = self.tok
@@ -244,13 +374,16 @@ class Parser:
             self.i += 1
             return "void"
         else:
-            raise ParseError(f"{self.path}:{x.line}:{x.col}: ожидался тип, найдено {x.t!r}")
+            raise ParseError(
+                f"{self.path}:{x.line}:{x.col}: ожидался тип, найдено {x.t!r}"
+            )
         while self.at_op("[") and self.peek().t == "]":
             self.i += 2
             parts.append("[]")
         return "".join(parts)
 
     def parse_type_args(self):
+        """Разбирает аргументы типа ``<…>`` и возвращает их текстом."""
         self.expect("<")
         out = ["<"]
         if self.at_op(">"):
@@ -270,15 +403,16 @@ class Parser:
     def try_type(self):
         """Спекулятивный разбор типа; при неудаче откат и None."""
         save = self.i
-        saved_toks = None
         try:
             return self.parse_type()
         except ParseError:
             self.i = save
             return None
 
-    # ---------------------------------------------------------------- annotations
+    # ----------------------------------------------------------------
+    # annotations
     def parse_annotation(self):
+        """Разбирает аннотацию; аргументы сохраняются исходным текстом."""
         self.expect("@")
         name = self.ident()
         while self.at_op(".") and self.peek().k == "id":
@@ -288,14 +422,19 @@ class Parser:
         if self.at_op("("):
             start = self.i
             self.skip_balanced("(", ")")
-            args = " ".join(t.t for t in self.toks[start:self.i])
+            args = " ".join(t.t for t in self.toks[start : self.i])
         return Annot(name, args)
 
     def parse_modifiers(self):
+        """Разбирает модификаторы и аннотации перед объявлением."""
         mods, annots = set(), []
         while True:
             x = self.tok
-            if x.k == "op" and x.t == "@" and not (self.peek().t == "interface"):
+            if (
+                x.k == "op"
+                and x.t == "@"
+                and not (self.peek().t == "interface")
+            ):
                 annots.append(self.parse_annotation())
             elif x.k == "kw" and x.t in MODIFIERS:
                 if x.t == "default" and self.peek().t in (":", "->"):
@@ -306,8 +445,10 @@ class Parser:
                 break
         return mods, annots
 
-    # ---------------------------------------------------------------- compilation unit
+    # ----------------------------------------------------------------
+    # compilation unit
     def parse_unit(self):
+        """Разбирает файл: пакет, импорты и объявления типов."""
         types = []
         if self.at("package"):
             self.i += 1
@@ -327,6 +468,7 @@ class Parser:
         return types
 
     def qualified(self, allow_star=False):
+        """Читает составное имя через точку (в импорте — и ``.*``)."""
         parts = [self.ident()]
         while self.at_op("."):
             self.i += 1
@@ -337,8 +479,10 @@ class Parser:
             parts.append(self.ident())
         return ".".join(parts)
 
-    # ---------------------------------------------------------------- declarations
+    # ----------------------------------------------------------------
+    # declarations
     def parse_class(self, mods, annots, outer):
+        """Разбирает объявление класса, интерфейса, перечисления, аннотации."""
         x = self.tok
         if x.t == "@" and self.peek().t == "interface":
             self.i += 2
@@ -347,10 +491,30 @@ class Parser:
             kind = x.t
             self.i += 1
         else:
-            raise ParseError(f"{self.path}:{x.line}:{x.col}: ожидалось class/interface/enum, найдено {x.t!r}")
+            raise ParseError(
+                f"{self.path}:{x.line}:{x.col}: "
+                f"ожидалось class/interface/enum, найдено {x.t!r}"
+            )
         line = x.line
         name = self.ident()
-        c = ClassDecl(kind, name, mods, annots, None, [], [], [], [], [], [], line, line, outer, False, None)
+        c = ClassDecl(
+            kind,
+            name,
+            mods,
+            annots,
+            None,
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            line,
+            line,
+            outer,
+            False,
+            None,
+        )
         if outer is None:
             c.fqn = (self.pkg + "." if self.pkg else "") + name
         else:
@@ -372,7 +536,7 @@ class Parser:
         return c
 
     def parse_type_params(self):
-        """<T extends X, U> -> ['T', 'U'] (имена параметров верхнего уровня)."""
+        """Возвращает имена параметров типа: ``<T extends X, U>`` -> T, U."""
         self.expect("<")
         depth = 1
         names = []
@@ -399,6 +563,7 @@ class Parser:
         return names
 
     def parse_class_body(self, c):
+        """Разбирает тело класса до закрывающей скобки."""
         self.expect("{")
         if c.kind == "enum":
             self.parse_enum_constants(c)
@@ -410,6 +575,7 @@ class Parser:
         self.expect("}")
 
     def parse_enum_constants(self, c):
+        """Разбирает константы перечисления с аргументами и телами."""
         while self.tok.k == "id" or self.at_op("@"):
             while self.at_op("@"):
                 self.parse_annotation()
@@ -420,7 +586,24 @@ class Parser:
                 args = self.parse_args()
             body = None
             if self.at_op("{"):
-                body = ClassDecl("class", c.name + "$" + name, set(), [], c.name, [], [], [], [], [], [], line, line, c, True, c.fqn + "$" + name)
+                body = ClassDecl(
+                    "class",
+                    c.name + "$" + name,
+                    set(),
+                    [],
+                    c.name,
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    line,
+                    line,
+                    c,
+                    True,
+                    c.fqn + "$" + name,
+                )
                 self.parse_class_body(body)
             c.enums.append(EnumConst(name, args, body, line))
             if not self.accept(","):
@@ -430,6 +613,7 @@ class Parser:
             pass
 
     def parse_member(self, c):
+        """Разбирает член класса: поле, метод, конструктор, блок, тип."""
         if self.accept(";"):
             return
         if self.at_op("{"):
@@ -444,7 +628,9 @@ class Parser:
         start_line = self.tok.line
         mods, annots = self.parse_modifiers()
         x = self.tok
-        if x.t in ("class", "interface", "enum") or (x.t == "@" and self.peek().t == "interface"):
+        if x.t in ("class", "interface", "enum") or (
+            x.t == "@" and self.peek().t == "interface"
+        ):
             inner = self.parse_class(mods, annots, c)
             c.inner.append(inner)
             return
@@ -454,7 +640,11 @@ class Parser:
             tparams = True
         line = self.tok.line
         # конструктор
-        if self.tok.k == "id" and self.tok.t == c.name and self.peek().t == "(":
+        if (
+            self.tok.k == "id"
+            and self.tok.t == c.name
+            and self.peek().t == "("
+        ):
             self.i += 1
             params = self.parse_params()
             if self.accept("throws"):
@@ -462,7 +652,20 @@ class Parser:
                 while self.accept(","):
                     self.parse_type()
             body = self.parse_block()
-            m = MethodDecl("<init>", params, None, body, mods, annots, line, body_end(body, self), c, True, tparams, start_line)
+            m = MethodDecl(
+                "<init>",
+                params,
+                None,
+                body,
+                mods,
+                annots,
+                line,
+                body_end(body, self),
+                c,
+                True,
+                tparams,
+                start_line,
+            )
             c.methods.append(m)
             return
         rtype = self.parse_type()
@@ -481,12 +684,25 @@ class Parser:
                 body = self.parse_block()
                 end = self.toks[self.i - 1].line
             else:
-                if self.accept("default"):      # аннотационное значение
+                if self.accept("default"):  # аннотационное значение
                     while not self.at_op(";"):
                         self.i += 1
                 self.expect(";")
                 end = self.toks[self.i - 1].line
-            m = MethodDecl(name, params, rtype, body, mods, annots, nm_tok.line, end, c, False, tparams, start_line)
+            m = MethodDecl(
+                name,
+                params,
+                rtype,
+                body,
+                mods,
+                annots,
+                nm_tok.line,
+                end,
+                c,
+                False,
+                tparams,
+                start_line,
+            )
             c.methods.append(m)
             return
         # поля
@@ -498,7 +714,9 @@ class Parser:
             init = None
             if self.accept("="):
                 init = self.parse_var_init()
-            c.fields.append(FieldDecl(ftype, name, init, mods, annots, nm_tok.line, c))
+            c.fields.append(
+                FieldDecl(ftype, name, init, mods, annots, nm_tok.line, c)
+            )
             if self.accept(","):
                 nm_tok = self.tok
                 name = self.ident()
@@ -507,6 +725,7 @@ class Parser:
         self.expect(";")
 
     def parse_params(self):
+        """Разбирает список параметров метода."""
         self.expect("(")
         params = []
         while not self.at_op(")"):
@@ -528,8 +747,10 @@ class Parser:
         self.expect(")")
         return params
 
-    # ---------------------------------------------------------------- statements
+    # ----------------------------------------------------------------
+    # statements
     def parse_block(self):
+        """Разбирает блок операторов в фигурных скобках."""
         line = self.tok.line
         self.expect("{")
         stmts = []
@@ -541,11 +762,13 @@ class Parser:
         return Block(stmts, line)
 
     def parse_var_init(self):
+        """Разбирает инициализатор переменной (выражение или массив)."""
         if self.at_op("{"):
             return self.parse_array_init()
         return self.parse_expr()
 
     def parse_array_init(self):
+        """Разбирает литерал массива ``{a, b, …}``."""
         self.expect("{")
         elems = []
         while not self.at_op("}"):
@@ -556,7 +779,11 @@ class Parser:
         return ArrayLit(elems)
 
     def is_local_decl(self):
-        """Начинается ли оператор с объявления локальной переменной: Type ident (= | ; | , | : | [)."""
+        """Проверяет, начинается ли оператор с объявления переменной.
+
+        Объявление — тип и имя, за которыми идёт ``=``, ``;``, ``,``, ``:``
+        или ``[``.
+        """
         x = self.tok
         if x.k == "kw" and x.t in PRIMS:
             return True
@@ -568,8 +795,14 @@ class Parser:
             return False
         save = self.i
         try:
-            t = self.parse_type()
-            ok = self.tok.k == "id" and self.peek().t in ("=", ";", ",", ":", "[")
+            self.parse_type()
+            ok = self.tok.k == "id" and self.peek().t in (
+                "=",
+                ";",
+                ",",
+                ":",
+                "[",
+            )
             return ok
         except ParseError:
             return False
@@ -577,6 +810,7 @@ class Parser:
             self.i = save
 
     def parse_stmt(self):
+        """Разбирает один оператор."""
         x = self.tok
         line = x.line
         if x.k == "op":
@@ -658,7 +892,9 @@ class Parser:
                     m = self.parse_expr()
                 self.expect(";")
                 return Assert(c, m)
-            if t in ("class", "interface", "enum", "abstract", "static") or (t == "final" and self.peek().t == "class"):
+            if t in ("class", "interface", "enum", "abstract", "static") or (
+                t == "final" and self.peek().t == "class"
+            ):
                 mods, annots = self.parse_modifiers()
                 if self.tok.t in ("class", "interface", "enum"):
                     return LocalClass(self.parse_class(mods, annots, None))
@@ -673,12 +909,12 @@ class Parser:
         return ExprStmt(e, line)
 
     def parse_local_var(self, line):
+        """Разбирает объявление локальных переменных."""
         self.parse_modifiers()
         t = self.parse_type()
         decls = []
         while True:
             nm = self.ident()
-            tt = t
             while self.at_op("[") and self.peek().t == "]":
                 self.i += 2
             init = None
@@ -691,6 +927,7 @@ class Parser:
         return LocalVar(t, decls, line)
 
     def parse_for(self):
+        """Разбирает цикл ``for`` (обычный и по коллекции)."""
         line = self.tok.line
         self.expect("for")
         self.expect("(")
@@ -738,6 +975,7 @@ class Parser:
         return For(init, c, upd, self.parse_stmt(), line)
 
     def parse_try(self):
+        """Разбирает ``try`` с ресурсами, ``catch`` и ``finally``."""
         line = self.tok.line
         self.expect("try")
         res = []
@@ -745,7 +983,7 @@ class Parser:
             while not self.at_op(")"):
                 if self.is_local_decl():
                     self.parse_modifiers()
-                    t = self.parse_type()
+                    self.parse_type()
                     nm = self.ident()
                     self.expect("=")
                     res.append((nm, self.parse_expr()))
@@ -772,6 +1010,7 @@ class Parser:
         return Try(res, body, catches, fin, line)
 
     def parse_switch(self):
+        """Разбирает ``switch`` с метками ``case`` и ``default``."""
         line = self.tok.line
         self.expect("switch")
         self.expect("(")
@@ -800,20 +1039,38 @@ class Parser:
             else:
                 self.expect(":")
                 stmts = []
-                while not (self.at("case") or self.at("default") or self.at_op("}")):
+                while not (
+                    self.at("case") or self.at("default") or self.at_op("}")
+                ):
                     stmts.append(self.parse_stmt())
             cases.append((labels, stmts))
         self.expect("}")
         return Switch(e, cases, line)
 
-    # ---------------------------------------------------------------- expressions
+    # ----------------------------------------------------------------
+    # expressions
     def parse_expr(self):
+        """Разбирает выражение."""
         return self.parse_assign()
 
-    ASSIGN_OPS = {"=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ">>>="}
+    ASSIGN_OPS = {
+        "=",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+        "%=",
+        "&=",
+        "|=",
+        "^=",
+        "<<=",
+        ">>=",
+        ">>>=",
+    }
 
     def parse_assign(self):
         # лямбда
+        """Разбирает присваивание, лямбду или выражение ниже уровнем."""
         lam = self.try_lambda()
         if lam is not None:
             return lam
@@ -826,6 +1083,7 @@ class Parser:
         return left
 
     def try_lambda(self):
+        """Пытается разобрать лямбда-выражение; иначе возвращает ``None``."""
         x = self.tok
         if x.k == "id" and self.peek().t == "->" and self.peek().k == "op":
             self.i += 2
@@ -865,11 +1123,13 @@ class Parser:
         return None
 
     def parse_lambda_body(self):
+        """Разбирает тело лямбды: блок или выражение."""
         if self.at_op("{"):
             return self.parse_block()
         return self.parse_expr()
 
     def parse_ternary(self):
+        """Разбирает условный оператор ``c ? a : b``."""
         c = self.parse_binary(0)
         if self.at_op("?"):
             self.i += 1
@@ -880,15 +1140,27 @@ class Parser:
         return c
 
     def parse_ternary_branch(self):
+        """Разбирает ветку условного оператора."""
         lam = self.try_lambda()
         if lam is not None:
             return lam
         return self.parse_ternary()
 
-    PREC = [("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="), ("<", ">", "<=", ">=", "instanceof"),
-            ("<<", ">>", ">>>"), ("+", "-"), ("*", "/", "%")]
+    PREC = [
+        ("||",),
+        ("&&",),
+        ("|",),
+        ("^",),
+        ("&",),
+        ("==", "!="),
+        ("<", ">", "<=", ">=", "instanceof"),
+        ("<<", ">>", ">>>"),
+        ("+", "-"),
+        ("*", "/", "%"),
+    ]
 
     def parse_binary(self, level):
+        """Разбирает бинарные операторы уровня приоритета ``level``."""
         if level >= len(self.PREC):
             return self.parse_unary()
         left = self.parse_binary(level + 1)
@@ -905,7 +1177,8 @@ class Parser:
                         bind = self.ident()
                     left = InstanceOf(left, t, bind)
                     continue
-                # '>' может быть началом '>>' с пробелами — токенайзер уже склеил подряд идущие
+                # '>' может быть началом '>>' с пробелами — токенайзер уже
+                # склеил подряд идущие
                 self.i += 1
                 right = self.parse_binary(level + 1)
                 left = Binary(x.t, left, right)
@@ -914,12 +1187,17 @@ class Parser:
         return left
 
     def parse_unary(self):
+        """Разбирает унарные операторы и приведение типа."""
         x = self.tok
         if x.k == "op":
             if x.t in ("+", "-", "!", "~"):
                 self.i += 1
                 e = self.parse_unary()
-                if x.t == "-" and isinstance(e, Lit) and e.kind in ("int", "float"):
+                if (
+                    x.t == "-"
+                    and isinstance(e, Lit)
+                    and e.kind in ("int", "float")
+                ):
                     return Lit(e.kind, -e.val)
                 return Unary(x.t, e)
             if x.t in ("++", "--"):
@@ -932,6 +1210,7 @@ class Parser:
         return self.parse_postfix()
 
     def try_cast(self):
+        """Пытается разобрать приведение типа ``(T) e``; иначе ``None``."""
         save = self.i
         self.i += 1
         x = self.tok
@@ -949,8 +1228,22 @@ class Parser:
                     self.parse_type()
                 if self.at_op(")"):
                     nx = self.peek()
-                    if nx.k in ("id", "str", "chr", "num") or (nx.k == "kw" and nx.t in ("new", "this", "super", "true", "false", "null")) \
-                            or (nx.k == "op" and nx.t in ("(", "!", "~")):
+                    if (
+                        nx.k in ("id", "str", "chr", "num")
+                        or (
+                            nx.k == "kw"
+                            and nx.t
+                            in (
+                                "new",
+                                "this",
+                                "super",
+                                "true",
+                                "false",
+                                "null",
+                            )
+                        )
+                        or (nx.k == "op" and nx.t in ("(", "!", "~"))
+                    ):
                         self.i += 1
                         return Cast(t, self.parse_unary())
         except ParseError:
@@ -959,6 +1252,7 @@ class Parser:
         return None
 
     def parse_args(self):
+        """Разбирает аргументы вызова в круглых скобках."""
         self.expect("(")
         args = []
         while not self.at_op(")"):
@@ -969,13 +1263,14 @@ class Parser:
         return args
 
     def parse_postfix(self):
+        """Разбирает обращения через точку, индексы, вызовы и ``x++``."""
         e = self.parse_primary()
         while True:
             x = self.tok
             if x.k == "op":
                 if x.t == ".":
                     self.i += 1
-                    if self.at_op("<"):               # явные типовые аргументы
+                    if self.at_op("<"):  # явные типовые аргументы
                         self.parse_type_args()
                     y = self.tok
                     if y.k == "kw" and y.t == "new":  # outer.new Inner()
@@ -1021,6 +1316,7 @@ class Parser:
         return e
 
     def parse_new(self, outer=None):
+        """Разбирает ``new``: объект, массив или анонимный класс."""
         x = self.expect("new")
         self.parse_modifiers()
         if self.tok.k == "kw" and self.tok.t in PRIMS:
@@ -1045,11 +1341,29 @@ class Parser:
         body = None
         if self.at_op("{"):
             self.anon_counter[None] = self.anon_counter.get(None, 0) + 1
-            body = ClassDecl("class", "", set(), [], t, [], [], [], [], [], [], x.line, x.line, None, True, None)
+            body = ClassDecl(
+                "class",
+                "",
+                set(),
+                [],
+                t,
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
+                x.line,
+                x.line,
+                None,
+                True,
+                None,
+            )
             self.parse_class_body(body)
         return New(t, args, body, x.line, x.col, outer)
 
     def parse_type_no_dims(self):
+        """Разбирает тип без скобок массива (после ``new``)."""
         parts = []
         x = self.tok
         if x.k == "kw" and x.t in PRIMS:
@@ -1067,6 +1381,7 @@ class Parser:
         return "".join(parts)
 
     def parse_primary(self):
+        """Разбирает первичное выражение: литерал, имя, скобки, ``new``."""
         x = self.tok
         k = x.k
         if k == "num":
@@ -1108,7 +1423,9 @@ class Parser:
                     return ClassLit(ty)
                 if self.at_op("::"):
                     return TypeExpr(ty)
-                raise ParseError(f"{self.path}:{x.line}:{x.col}: неожиданный {t}")
+                raise ParseError(
+                    f"{self.path}:{x.line}:{x.col}: неожиданный {t}"
+                )
             if t == "switch":
                 s = self.parse_switch()
                 return s
@@ -1147,10 +1464,13 @@ class Parser:
                     pass
                 self.i = save
             return Name(x.t, x.line, x.col)
-        raise ParseError(f"{self.path}:{x.line}:{x.col}: неожиданный токен {x.t!r}")
+        raise ParseError(
+            f"{self.path}:{x.line}:{x.col}: неожиданный токен {x.t!r}"
+        )
 
     @staticmethod
     def num_lit(t):
+        """Переводит числовой литерал Java в узел ``Lit``."""
         s = t.replace("_", "")
         low = s.lower()
         try:
@@ -1158,21 +1478,45 @@ class Parser:
                 return Lit("int", int(low.rstrip("l"), 16))
             if low.endswith("l") and "." not in low:
                 return Lit("int", int(low[:-1]))
-            if low.endswith("f") or low.endswith("d") or "." in low or "e" in low:
+            if (
+                low.endswith("f")
+                or low.endswith("d")
+                or "." in low
+                or "e" in low
+            ):
                 return Lit("float", float(low.rstrip("fd")))
-            return Lit("int", int(low, 8) if low.startswith("0") and len(low) > 1 and low.isdigit() else int(low))
+            return Lit(
+                "int",
+                (
+                    int(low, 8)
+                    if low.startswith("0") and len(low) > 1 and low.isdigit()
+                    else int(low)
+                ),
+            )
         except ValueError:
             return Lit("float", 0.0)
 
 
 def body_end(body, p):
+    """Возвращает строку последней лексемы только что разобранного тела."""
     return p.toks[p.i - 1].line
 
 
-ESC = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "0": "\0", "\\": "\\", "'": "'", '"': '"'}
+ESC = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "b": "\b",
+    "f": "\f",
+    "0": "\0",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+}
 
 
 def unescape(s):
+    """Раскрывает escape-последовательности строкового литерала Java."""
     if "\\" not in s:
         return s
     out, i = [], 0
@@ -1182,7 +1526,7 @@ def unescape(s):
             d = s[i + 1]
             if d == "u" and i + 5 < len(s) + 1:
                 try:
-                    out.append(chr(int(s[i + 2:i + 6], 16)))
+                    out.append(chr(int(s[i + 2 : i + 6], 16)))
                     i += 6
                     continue
                 except ValueError:
@@ -1196,6 +1540,7 @@ def unescape(s):
 
 
 def parse_file(path, text=None):
+    """Разбирает файл Java и возвращает ``(разборщик, объявления типов)``."""
     if text is None:
         with open(path, encoding="utf-8", errors="replace") as f:
             text = f.read()

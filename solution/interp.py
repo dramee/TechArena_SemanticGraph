@@ -1,51 +1,135 @@
-"""Интерпретатор подмножества Java с неизвестными значениями (UNK) и эвристикой выбора ветвей.
+"""Интерпретатор подмножества Java для кода сервисов Train Ticket.
 
-Выполняет код проекта «как JVM»: методы, конструкторы, вызовы между сервисами (RestTemplate), репозитории (БД в памяти).
-Записывает в Trace множества executes / calls / remote / data.
+Выполняет код проекта «как JVM»: методы, конструкторы, вызовы между
+сервисами (RestTemplate), репозитории (база в памяти). Невычислимые значения
+представлены как UNK, а условие над UNK решается эвристикой выбора ветви.
+Итог прогона — трасса с множествами executes, calls, remote и data.
 """
-import re, sys, math, collections, datetime
-from jparse import *
-from model import (Project, ClassInfo, MethodInfo, FieldInfo, strip_generics, type_args, PRIM_DEFAULT, NUMERIC_BOXED)
-from values import *
-import lib
-import config as _cfg
-from model import called_names
+
+import collections
+import itertools
+import random
+import re
+
+from . import config as _cfg
+from . import lib
+from .jparse import (
+    ArrayLit,
+    Assert,
+    Assign,
+    Binary,
+    Block,
+    Break,
+    Call,
+    Cast,
+    ClassDecl,
+    ClassLit,
+    Cond,
+    Continue,
+    DoWhile,
+    Empty,
+    ExprStmt,
+    FieldAcc,
+    For,
+    ForEach,
+    If,
+    Index,
+    InstanceOf,
+    Labeled,
+    Lambda,
+    Lit,
+    LocalClass,
+    LocalVar,
+    MethodRef,
+    Name,
+    New,
+    NewArray,
+    Postfix,
+    Return,
+    Super,
+    Switch,
+    Sync,
+    This,
+    Throw,
+    Try,
+    TypeExpr,
+    Unary,
+    While,
+)
+from .model import (
+    PRIM_DEFAULT,
+    ClassInfo,
+    called_names,
+    strip_generics,
+    type_args,
+)
+from .values import (
+    NOTFOUND,
+    NOW,
+    UNK,
+    BreakEx,
+    ContinueEx,
+    JavaThrow,
+    JClass,
+    JEnum,
+    JLambda,
+    JList,
+    JMethodRef,
+    JObj,
+    JOpt,
+    JSet,
+    LibObj,
+    ReturnEx,
+)
 
 
 class Trace:
+    """Итог прогона: множества рёбер executes, calls, remote и data."""
+
     def __init__(self):
+        """Создаёт пустую трассу."""
         self.executes = set()
         self.calls = set()
         self.remote = set()
         self.data = set()
-        self.exec_origin = collections.defaultdict(set)      # id метода -> {'new','hib','call','lib'}
+        self.exec_origin = collections.defaultdict(
+            set
+        )  # id метода -> {'new','hib','call','lib'}
         self.call_origin = {}
 
     def merge(self, other):
-        self.executes |= other.executes; self.calls |= other.calls
-        self.remote |= other.remote; self.data |= other.data
+        """Добавляет в трассу рёбра другой трассы."""
+        self.executes |= other.executes
+        self.calls |= other.calls
+        self.remote |= other.remote
+        self.data |= other.data
 
 
 class OutOfFuel(BaseException):
-    """Защита от зацикливания: слишком много вызовов методов в одном сценарии."""
-    pass
+    """Защита от зацикливания: слишком много вызовов методов в одном шаге."""
 
 
 class StaticRef:
     """Имя класса в позиции выражения."""
+
     __slots__ = ("ci", "name")
 
     def __init__(self, ci, name):
+        """Ссылается на класс ``ci``, упомянутый в коде как ``name``."""
         self.ci, self.name = ci, name
 
     def __repr__(self):
+        """Возвращает имя класса."""
         return f"Static<{self.name}>"
 
 
 class Frame:
+    """Кадр вызова: метод, ``this``, класс и локальные переменные."""
+
     __slots__ = ("method", "this", "locals", "cls", "up", "module", "static")
 
     def __init__(self, method, this, cls, up=None):
+        """Создаёт кадр; ``up`` — окружение лямбды или анонимного класса."""
         self.method, self.this, self.cls, self.up = method, this, cls, up
         self.locals = {}
         self.module = cls.module if cls is not None else None
@@ -53,85 +137,147 @@ class Frame:
 
 class LibClass:
     """Синтетический ClassInfo для библиотечных исключений."""
+
     pass
 
 
+# Зерно генератора случайных чисел: прогоны воспроизводимы.
+RANDOM_SEED = 12345
+
+# Предел вызовов методов на прогон (переопределяется на каждый шаг).
+DEFAULT_FUEL = 4_000_000
+
+# Предел глубины вызовов методов: глубже рекурсия считается бесконечной.
+MAX_CALL_DEPTH = 400
+
+# Предел итераций цикла с неизвестным условием.
+LOOP_CAP = 50
+
 # иерархия библиотечных исключений
 EXC_PARENT = {
-    "Throwable": None, "Exception": "Throwable", "Error": "Throwable", "RuntimeException": "Exception",
-    "IOException": "Exception", "ServletException": "Exception", "InterruptedException": "Exception",
-    "ParseException": "Exception", "IllegalStateException": "RuntimeException",
-    "IllegalArgumentException": "RuntimeException", "NullPointerException": "RuntimeException",
-    "NumberFormatException": "IllegalArgumentException", "IndexOutOfBoundsException": "RuntimeException",
-    "ArrayIndexOutOfBoundsException": "IndexOutOfBoundsException", "ClassCastException": "RuntimeException",
-    "UnsupportedOperationException": "RuntimeException", "NoSuchElementException": "RuntimeException",
-    "ArithmeticException": "RuntimeException", "JwtException": "RuntimeException",
-    "AuthenticationException": "RuntimeException", "BadCredentialsException": "AuthenticationException",
-    "UsernameNotFoundException": "AuthenticationException", "RestClientException": "RuntimeException",
-    "HttpClientErrorException": "RestClientException", "HttpServerErrorException": "RestClientException",
-    "ResourceAccessException": "RestClientException", "JsonProcessingException": "IOException",
-    "DataAccessException": "RuntimeException", "EmptyResultDataAccessException": "DataAccessException",
-    "MessagingException": "Exception", "ExecutionException": "Exception", "TimeoutException": "Exception",
+    "Throwable": None,
+    "Exception": "Throwable",
+    "Error": "Throwable",
+    "RuntimeException": "Exception",
+    "IOException": "Exception",
+    "ServletException": "Exception",
+    "InterruptedException": "Exception",
+    "ParseException": "Exception",
+    "IllegalStateException": "RuntimeException",
+    "IllegalArgumentException": "RuntimeException",
+    "NullPointerException": "RuntimeException",
+    "NumberFormatException": "IllegalArgumentException",
+    "IndexOutOfBoundsException": "RuntimeException",
+    "ArrayIndexOutOfBoundsException": "IndexOutOfBoundsException",
+    "ClassCastException": "RuntimeException",
+    "UnsupportedOperationException": "RuntimeException",
+    "NoSuchElementException": "RuntimeException",
+    "ArithmeticException": "RuntimeException",
+    "JwtException": "RuntimeException",
+    "AuthenticationException": "RuntimeException",
+    "BadCredentialsException": "AuthenticationException",
+    "UsernameNotFoundException": "AuthenticationException",
+    "RestClientException": "RuntimeException",
+    "HttpClientErrorException": "RestClientException",
+    "HttpServerErrorException": "RestClientException",
+    "ResourceAccessException": "RestClientException",
+    "JsonProcessingException": "IOException",
+    "DataAccessException": "RuntimeException",
+    "EmptyResultDataAccessException": "DataAccessException",
+    "MessagingException": "Exception",
+    "ExecutionException": "Exception",
+    "TimeoutException": "Exception",
 }
 
 
 class Interp:
+    """Интерпретатор кода сервисов: исполняет методы и пишет трассу."""
+
     def __init__(self, proj, tables, trace=None):
+        """Готовит интерпретатор для проекта ``proj`` и базы ``tables``."""
         self.p = proj
         self.trace = trace if trace is not None else Trace()
-        self.tables = tables                    # имя таблицы -> db.Table
-        self.statics = {}                       # ClassInfo -> dict
-        self.beans = {}                         # (module, ClassInfo) -> JObj
+        # Имя таблицы -> db.Table.
+        self.tables = tables
+        # ClassInfo -> статические поля класса.
+        self.statics = {}
+        # (модуль, ClassInfo) -> бин Spring.
+        self.beans = {}
         self.depth = 0
-        self.decisions = []                     # журнал неопределённых условий
+        # Журнал решений по неопределённым условиям.
+        self.decisions = []
         self.warnings = collections.Counter()
-        self.stack = []                         # стек Frame
-        self.mode_log = False
+        # Стек кадров Frame.
+        self.stack = []
         self._anon = {}
         self.exc_classes = {}
-        self.max_depth = 400
-        self.loop_cap = 50
-        self.web = None                         # заполняется web.Web
-        self.repos = None                       # заполняется repo.Repos
-        self.overrides = {}                     # (file, line) -> bool решения для неопределённых условий
-        self.hooks = []
+        # Пароли, известные клиенту (имя -> пароль): ими эмулируется сверка
+        # хешей BCrypt.
+        self.known_passwords = {}
+        self.max_depth = MAX_CALL_DEPTH
+        self.loop_cap = LOOP_CAP
+        # Заполняются при создании web.Web и repo.Repos.
+        self.web = None
+        self.repos = None
+        # (файл, строка) -> решение для неопределённого условия.
+        self.overrides = {}
         self.exc_log = []
-        self.fuel = 4_000_000
+        self.fuel = DEFAULT_FUEL
         self.session = {}
         self.origin = None
         self.lombok_depth = 0
         self.auth_log = []
         self.json_trace = Trace()
-        import random as _r
-        self.rng = _r.Random(12345)
+        self.rng = random.Random(RANDOM_SEED)
+        self.now = NOW
+        self.uuid_counter = itertools.count(1)
 
-    # ------------------------------------------------------------------------------------------ трассировка
+    def new_uuid(self):
+        """Возвращает следующий детерминированный UUID этого прогона."""
+        return "00000000-0000-4000-8000-%012d" % next(self.uuid_counter)
+
+    # ------------------------------------------------------------------------------------------
+    # трассировка
     @staticmethod
     def has_stmts(mi):
+        """Проверяет, что у метода есть тело с операторами."""
         b = mi.decl.body
         return b is not None and any(not isinstance(x, Empty) for x in b.stmts)
 
     def rec_exec(self, mi):
+        """Отмечает исполнение метода (ребро executes)."""
         if mi is not None and mi.id and self.has_stmts(mi):
             self.trace.executes.add(mi.id)
             self.trace.exec_origin[mi.id].add(self.origin or "call")
 
     def rec_call(self, caller, callee):
-        if caller is not None and caller.id and callee is not None and callee.id and self.has_stmts(callee):
+        """Отмечает вызов метода методом (ребро calls)."""
+        if (
+            caller is not None
+            and caller.id
+            and callee is not None
+            and callee.id
+            and self.has_stmts(callee)
+        ):
             self.trace.calls.add((caller.id, callee.id))
 
     def warn(self, what):
+        """Считает предупреждение интерпретатора (для журнала ``-v``)."""
         self.warnings[what] += 1
 
-    # ------------------------------------------------------------------------------------------ статика / бины
+    # ------------------------------------------------------------------------------------------
+    # статика / бины
     def statics_of(self, ci):
+        """Возвращает статические поля класса, инициализируя их один раз."""
         st = self.statics.get(ci)
         if st is not None:
             return st
         st = {}
         self.statics[ci] = st
         saved = self.trace
-        self.trace = Trace()                    # инициализация классов происходит до сценария: не учитывается
+        self.trace = (
+            Trace()
+        )  # инициализация классов происходит до сценария: не учитывается
         try:
             fr = Frame(None, None, ci)
             if ci.kind == "enum":
@@ -141,7 +287,9 @@ class Interp:
                 for i, ec in enumerate(ci.decl.enums):
                     e = st[ec.name]
                     for f in self.p.all_fields(ci):
-                        e.f[f.name] = PRIM_DEFAULT.get(strip_generics(f.type), None)
+                        e.f[f.name] = PRIM_DEFAULT.get(
+                            strip_generics(f.type), None
+                        )
                     cls_for = ci
                     if ec.body is not None:
                         cls_for = self._anon_class(ec.body, ci, ci.name)
@@ -155,7 +303,14 @@ class Interp:
                 if f.static and f.init is not None:
                     try:
                         st[f.name] = self.ev_init(f.init, fr, f.type)
-                    except (JavaThrow, TypeError, AttributeError, KeyError, IndexError, ValueError):
+                    except (
+                        JavaThrow,
+                        TypeError,
+                        AttributeError,
+                        KeyError,
+                        IndexError,
+                        ValueError,
+                    ):
                         st[f.name] = UNK
             for is_static, blk in ci.decl.inits:
                 if is_static:
@@ -168,11 +323,13 @@ class Interp:
         return st
 
     def ev_init(self, e, fr, tname):
+        """Вычисляет инициализатор переменной (выражение или массив)."""
         if isinstance(e, ArrayLit):
             return JList(self.ev(x, fr) for x in e.elems)
         return self.ev(e, fr)
 
     def bean(self, module, ci):
+        """Возвращает бин Spring класса в модуле, создавая его один раз."""
         key = (module, ci)
         b = self.beans.get(key)
         if b is not None:
@@ -194,11 +351,16 @@ class Interp:
         finally:
             self.trace = saved
         for f in self.p.all_fields(ci):
-            if "Autowired" in f.annots or "Resource" in f.annots or "Inject" in f.annots:
+            if (
+                "Autowired" in f.annots
+                or "Resource" in f.annots
+                or "Inject" in f.annots
+            ):
                 b.f[f.name] = self.inject(module, f, ci)
         return b
 
     def inject(self, module, f, owner):
+        """Возвращает значение поля ``@Autowired``: бин или репозиторий."""
         t = strip_generics(f.type)
         tci = self.p.resolve(t, f.cls)
         if tci is None:
@@ -214,36 +376,80 @@ class Interp:
         return self.bean(module, tci)
 
     def is_component(self, ci):
-        return bool(ci.annots.keys() & {"Service", "Component", "RestController", "Controller", "Repository", "Configuration"})
+        """Проверяет, что класс — бин Spring (@Service, @Component и т. п.)."""
+        return bool(
+            ci.annots.keys()
+            & {
+                "Service",
+                "Component",
+                "RestController",
+                "Controller",
+                "Repository",
+                "Configuration",
+            }
+        )
 
-    # ------------------------------------------------------------------------------------------ классы
+    # ------------------------------------------------------------------------------------------
+    # классы
     def _anon_class(self, decl, outer_ci, super_name):
         key = id(decl)
         ci = self._anon.get(key)
         if ci is None:
-            ci = ClassInfo(decl, outer_ci.module, outer_ci.file, outer_ci.pkg, outer_ci.imports, outer_ci)
+            ci = ClassInfo(
+                decl,
+                outer_ci.module,
+                outer_ci.file,
+                outer_ci.pkg,
+                outer_ci.imports,
+                outer_ci,
+            )
             ci.super_name = super_name
             ci.anon = True
             for md_list in list(ci.methods.values()):
                 for mi in md_list:
-                    mi.id = self.p.method_by_start[outer_ci.file].get((mi.name, mi.decl.start))
+                    mi.id = self.p.method_by_start[outer_ci.file].get(
+                        (mi.name, mi.decl.start)
+                    )
             self._anon[key] = ci
         return ci
 
     def lib_exc_class(self, name):
+        """Возвращает описание библиотечного класса исключения."""
         ci = self.exc_classes.get(name)
         if ci is None:
-            ci = ClassInfo(ClassDecl("class", name, set(), [], EXC_PARENT.get(name), [], [], [], [], [], [], 0, 0, None, False, name),
-                           "<lib>", "", "", [])
+            ci = ClassInfo(
+                ClassDecl(
+                    "class",
+                    name,
+                    set(),
+                    [],
+                    EXC_PARENT.get(name),
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    [],
+                    0,
+                    0,
+                    None,
+                    False,
+                    name,
+                ),
+                "<lib>",
+                "",
+                "",
+                [],
+            )
             self.exc_classes[name] = ci
         return ci
 
     def is_exc_instance(self, v, tname, ctx):
-        """catch (T e): совпадение исключения v с типом tname."""
+        """Проверяет, ловит ли ``catch (T e)`` с типом ``tname`` исключение."""
         if not isinstance(v, JObj):
             return False
         base = strip_generics(tname).split(".")[-1]
-        if base in ("Throwable", "Exception") :
+        if base in ("Throwable", "Exception"):
             return True
         tci = self.p.resolve(tname, ctx)
         if tci is not None:
@@ -271,21 +477,34 @@ class Interp:
         return False
 
     def make_exc(self, name, msg=None):
+        """Создаёт объект библиотечного исключения с сообщением."""
         o = JObj(self.lib_exc_class(name))
         o.f["message"] = msg
-        if name in ("NullPointerException", "ClassCastException", "IndexOutOfBoundsException", "NoSuchElementException"):
-            where = [f"{f.method.cls.name}#{f.method.name}" for f in self.stack if f.method is not None][-4:]
+        if name in (
+            "NullPointerException",
+            "ClassCastException",
+            "IndexOutOfBoundsException",
+            "NoSuchElementException",
+        ):
+            where = [
+                f"{f.method.cls.name}#{f.method.name}"
+                for f in self.stack
+                if f.method is not None
+            ][-4:]
             self.exc_log.append((name, msg, where))
         return o
 
-    # ------------------------------------------------------------------------------------------ создание объектов
+    # ------------------------------------------------------------------------------------------
+    # создание объектов
     def default_fields(self, ci):
+        """Возвращает значения полей по умолчанию для нового объекта."""
         d = {}
         for f in self.p.all_fields(ci):
             d[f.name] = PRIM_DEFAULT.get(strip_generics(f.type), None)
         return d
 
     def instantiate(self, ci, args, caller, fr=None):
+        """Создаёт объект класса проекта и выполняет конструктор."""
         obj = JObj(ci, self.default_fields(ci))
         self._run_ctor(ci, obj, args, caller, fr)
         return obj
@@ -294,7 +513,13 @@ class Interp:
         return self.pick_overload(ci.ctors, args)
 
     def pick_overload(self, cands, args):
-        cands = [m for m in cands if len(m.params) == len(args) or (m.varargs and len(args) >= len(m.params) - 1)]
+        """Выбирает перегрузку метода по типам аргументов."""
+        cands = [
+            m
+            for m in cands
+            if len(m.params) == len(args)
+            or (m.varargs and len(args) >= len(m.params) - 1)
+        ]
         if not cands:
             return None
         if len(cands) == 1:
@@ -311,6 +536,7 @@ class Interp:
         return best
 
     def type_score(self, pt, a):
+        """Оценивает соответствие аргумента ``a`` типу параметра ``pt``."""
         pt = pt.split(".")[-1]
         if a is UNK:
             return 0
@@ -325,15 +551,39 @@ class Interp:
                 return 1
             return -3 if pt in ("String", "boolean") else 0
         if isinstance(a, float):
-            return 3 if pt in ("double", "float", "Double", "Float") else (-3 if pt in ("int", "long", "String") else 0)
+            return (
+                3
+                if pt in ("double", "float", "Double", "Float")
+                else (-3 if pt in ("int", "long", "String") else 0)
+            )
         if isinstance(a, str):
-            return 3 if pt in ("String", "CharSequence") else (1 if pt == "Object" else -3)
+            return (
+                3
+                if pt in ("String", "CharSequence")
+                else (1 if pt == "Object" else -3)
+            )
         if isinstance(a, JObj):
             if a.cls.name == pt:
                 return 4
-            return 2 if any(c.name == pt for c in self.p.supertypes(a.cls)) else (0 if pt == "Object" else -2)
+            return (
+                2
+                if any(c.name == pt for c in self.p.supertypes(a.cls))
+                else (0 if pt == "Object" else -2)
+            )
         if isinstance(a, list):
-            return 3 if pt in ("List", "ArrayList", "Collection", "Iterable", "LinkedList") or pt.endswith("[]") else -2
+            return (
+                3
+                if pt
+                in (
+                    "List",
+                    "ArrayList",
+                    "Collection",
+                    "Iterable",
+                    "LinkedList",
+                )
+                or pt.endswith("[]")
+                else -2
+            )
         return 0
 
     def _run_ctor(self, ci, obj, args, caller, fr):
@@ -346,7 +596,12 @@ class Interp:
             body = ctor.decl.body.stmts if ctor.decl.body else []
             first = body[0] if body else None
             explicit = None
-            if isinstance(first, ExprStmt) and isinstance(first.e, Call) and first.e.obj is None and first.e.name in ("this", "super"):
+            if (
+                isinstance(first, ExprStmt)
+                and isinstance(first.e, Call)
+                and first.e.obj is None
+                and first.e.name in ("this", "super")
+            ):
                 explicit = first.e
                 body = body[1:]
             if explicit is not None and explicit.name == "this":
@@ -357,7 +612,11 @@ class Interp:
             else:
                 sup = self.p.super_of(ci)
                 if sup is not None:
-                    a2 = [self.ev(a, f2) for a in explicit.args] if explicit is not None else []
+                    a2 = (
+                        [self.ev(a, f2) for a in explicit.args]
+                        if explicit is not None
+                        else []
+                    )
                     self._run_ctor(sup, obj, a2, ctor, f2)
                 self._field_inits(ci, obj)
             try:
@@ -380,7 +639,12 @@ class Interp:
         self.bind_params(ctor, args, f2)
         body = ctor.decl.body.stmts if ctor.decl.body else []
         first = body[0] if body else None
-        if isinstance(first, ExprStmt) and isinstance(first.e, Call) and first.e.obj is None and first.e.name in ("this", "super"):
+        if (
+            isinstance(first, ExprStmt)
+            and isinstance(first.e, Call)
+            and first.e.obj is None
+            and first.e.name in ("this", "super")
+        ):
             explicit = first.e
             body = body[1:]
             if explicit.name == "this":
@@ -391,7 +655,13 @@ class Interp:
             else:
                 sup = self.p.super_of(ci)
                 if sup is not None:
-                    self._run_ctor(sup, obj, [self.ev(a, f2) for a in explicit.args], ctor, f2)
+                    self._run_ctor(
+                        sup,
+                        obj,
+                        [self.ev(a, f2) for a in explicit.args],
+                        ctor,
+                        f2,
+                    )
                 self._field_inits(ci, obj)
         else:
             sup = self.p.super_of(ci)
@@ -405,7 +675,9 @@ class Interp:
             pass
 
     def _field_inits(self, ci, obj):
-        if not ci.decl.inits and not any(f.init is not None and not f.static for f in ci.fields.values()):
+        if not ci.decl.inits and not any(
+            f.init is not None and not f.static for f in ci.fields.values()
+        ):
             return
         fr = Frame(None, obj, ci)
         for f in ci.fields.values():
@@ -417,17 +689,23 @@ class Interp:
 
     def _lombok_ctor(self, ci, obj, args):
         flds = [f for f in ci.fields.values() if not f.static]
-        if "RequiredArgsConstructor" in ci.annots and "AllArgsConstructor" not in ci.annots:
+        if (
+            "RequiredArgsConstructor" in ci.annots
+            and "AllArgsConstructor" not in ci.annots
+        ):
             flds = [f for f in flds if f.final and f.init is None]
         for f, a in zip(flds, args):
             obj.f[f.name] = a
 
     def bind_params(self, mi, args, fr):
+        """Связывает параметры метода с аргументами в кадре."""
         ps = mi.params
         for i, (pt, pn, _) in enumerate(ps):
             if mi.varargs and i == len(ps) - 1:
                 rest = args[i:]
-                if len(rest) == 1 and (isinstance(rest[0], list) or rest[0] is None):
+                if len(rest) == 1 and (
+                    isinstance(rest[0], list) or rest[0] is None
+                ):
                     fr.locals[pn] = rest[0]
                 else:
                     fr.locals[pn] = JList(rest)
@@ -436,6 +714,7 @@ class Interp:
                 fr.locals[pn] = self.coerce(v, pt)
 
     def coerce(self, v, pt):
+        """Приводит числовое значение к типу параметра ``pt``."""
         pt = strip_generics(pt)
         if isinstance(v, bool) or v is None or v is UNK:
             return v
@@ -445,7 +724,8 @@ class Interp:
             return int(v)
         return v
 
-    # ------------------------------------------------------------------------------------------ вызов метода
+    # ------------------------------------------------------------------------------------------
+    # вызов метода
     def invoke(self, mi, this, args, caller):
         """Выполнить проектный метод с телом."""
         if mi.decl.body is None:
@@ -472,7 +752,11 @@ class Interp:
         except Exception as e:
             if getattr(e, "_where", None) is None:
                 try:
-                    e._where = [f"{f.method.cls.name}#{f.method.name}" for f in self.stack if f.method is not None][-6:]
+                    e._where = [
+                        f"{f.method.cls.name}#{f.method.name}"
+                        for f in self.stack
+                        if f.method is not None
+                    ][-6:]
                 except Exception:
                     pass
             raise
@@ -481,11 +765,17 @@ class Interp:
             self.stack.pop()
 
     def lib_invoke(self, mi, this, args):
-        """Вызов метода проекта из кода библиотеки (Spring Security, логирование/toString, коллекции) внутри метода проекта.
-        В эталоне такое выполнение даёт ребро calls от ближайшего метода проекта в стеке, если в его исходнике есть вызов с тем же именем."""
+        """Вызывает метод проекта из кода библиотеки внутри метода проекта.
+
+        Так вызывают Spring Security, логирование (toString) и коллекции.
+        В эталоне это даёт ребро calls от ближайшего метода проекта в стеке,
+        если в его исходнике есть вызов с тем же именем.
+        """
         r = self.invoke(mi, this, args, None)
         if self.lombok_depth and _cfg.LOMBOK_BREAKS_CHAIN:
-            return r           # между библиотекой и методом стоит сгенерированный Lombok метод класса проекта: ребра calls нет
+            # между библиотекой и методом стоит сгенерированный Lombok метод
+            # класса проекта: ребра calls нет
+            return r
         if _cfg.LIB_NAME_MATCH_EDGES and self.stack and not mi.ctor:
             f = self.stack[-1].method
             if f is not None and mi.name in called_names(f):
@@ -502,14 +792,17 @@ class Interp:
         return False, None
 
     def call_static(self, ci, name, args, caller):
+        """Вызывает статический метод класса проекта, если он есть."""
         cands = [m for m in self.p.find_methods(ci, name) if not m.abstract]
         mi = self.pick_overload(cands, args)
         if mi is not None:
             return True, self.invoke(mi, None, args, caller)
         return False, None
 
-    # ------------------------------------------------------------------------------------------ операторы
+    # ------------------------------------------------------------------------------------------
+    # операторы
     def ex(self, st, fr):
+        """Выполняет оператор в кадре ``fr``."""
         t = type(st)
         h = self._ex_table.get(t)
         if h is None:
@@ -517,20 +810,26 @@ class Interp:
         return h(self, st, fr)
 
     def ex_block(self, st, fr):
+        """Выполняет блок операторов."""
         for s in st.stmts:
             self.ex(s, fr)
 
     def ex_local(self, st, fr):
+        """Выполняет объявление локальных переменных."""
         for nm, init in st.decls:
             if init is None:
                 fr.locals[nm] = PRIM_DEFAULT.get(strip_generics(st.type), None)
             else:
-                fr.locals[nm] = self.coerce(self.ev_init(init, fr, st.type), st.type)
+                fr.locals[nm] = self.coerce(
+                    self.ev_init(init, fr, st.type), st.type
+                )
 
     def ex_expr(self, st, fr):
+        """Выполняет оператор-выражение."""
         self.ev(st.e, fr)
 
     def ex_if(self, st, fr):
+        """Выполняет условный оператор ``if``."""
         c = self.cond(st.c, fr, st)
         if c:
             self.ex(st.then, fr)
@@ -538,6 +837,7 @@ class Interp:
             self.ex(st.els, fr)
 
     def ex_while(self, st, fr):
+        """Выполняет цикл ``while``."""
         n = 0
         while True:
             c = self.cond(st.c, fr, st, loop=True)
@@ -559,6 +859,7 @@ class Interp:
                 raise
 
     def ex_dowhile(self, st, fr):
+        """Выполняет цикл ``do … while``."""
         n = 0
         while True:
             n += 1
@@ -575,6 +876,7 @@ class Interp:
                 break
 
     def ex_for(self, st, fr):
+        """Выполняет цикл ``for``."""
         for s in st.init:
             self.ex(s, fr)
         n = 0
@@ -598,6 +900,7 @@ class Interp:
                 self.ev(u, fr)
 
     def ex_foreach(self, st, fr):
+        """Выполняет цикл по коллекции."""
         it = self.ev(st.iter, fr)
         items = self.iter_items(it)
         for x in items:
@@ -613,10 +916,13 @@ class Interp:
                     raise
 
     def iter_items(self, it):
+        """Возвращает элементы коллекции для цикла по ней."""
         if it is UNK:
-            return [UNK]                # неизвестная коллекция: выполнить тело один раз
+            return [UNK]  # неизвестная коллекция: выполнить тело один раз
         if it is None:
-            raise JavaThrow(self.make_exc("NullPointerException", "for-each over null"))
+            raise JavaThrow(
+                self.make_exc("NullPointerException", "for-each over null")
+            )
         if isinstance(it, JSet):
             return list(it.values())
         if isinstance(it, dict):
@@ -628,20 +934,24 @@ class Interp:
         return [UNK]
 
     def ex_return(self, st, fr):
+        """Выполняет ``return``."""
         raise ReturnEx(self.ev(st.e, fr) if st.e is not None else None)
 
     def ex_throw(self, st, fr):
+        """Выполняет ``throw``."""
         v = self.ev(st.e, fr)
         raise JavaThrow(v)
 
     def ex_break(self, st, fr):
+        """Выполняет ``break``."""
         raise BreakEx(st.label)
 
     def ex_continue(self, st, fr):
+        """Выполняет ``continue``."""
         raise ContinueEx(st.label)
 
     def ex_try(self, st, fr):
-        res_objs = []
+        """Выполняет ``try`` с ресурсами, ``catch`` и ``finally``."""
         try:
             try:
                 for nm, e in st.res:
@@ -665,6 +975,7 @@ class Interp:
                 self.ex(st.fin, fr)
 
     def ex_switch(self, st, fr):
+        """Выполняет ``switch``."""
         v = self.ev(st.e, fr)
         matched = False
         try:
@@ -688,6 +999,7 @@ class Interp:
                 raise
 
     def case_label(self, lab, v, fr):
+        """Проверяет, совпадает ли метка ``case`` со значением."""
         if v is UNK:
             return False
         if isinstance(lab, Name) and isinstance(v, JEnum):
@@ -696,9 +1008,11 @@ class Interp:
         return lv == v
 
     def ex_sync(self, st, fr):
+        """Выполняет блок ``synchronized``."""
         self.ex(st.body, fr)
 
     def ex_labeled(self, st, fr):
+        """Выполняет оператор с меткой."""
         try:
             self.ex(st.stmt, fr)
         except BreakEx as b:
@@ -706,15 +1020,17 @@ class Interp:
                 raise
 
     def ex_noop(self, st, fr):
-        pass
+        """Пропускает пустой оператор или объявление класса."""
 
     def ex_assert(self, st, fr):
-        pass
+        """Пропускает ``assert`` (в сервисах проверки выключены)."""
 
     _ex_table = {}
 
-    # ------------------------------------------------------------------------------------------ условия
+    # ------------------------------------------------------------------------------------------
+    # условия
     def cond(self, e, fr, node, loop=False):
+        """Вычисляет условие; неизвестное условие решается эвристикой."""
         v = self.ev(e, fr)
         if v is UNK:
             return self.decide(e, fr, node, loop)
@@ -736,7 +1052,11 @@ class Interp:
         return d
 
     def _decide_loop(self, e, node):
-        return getattr(node, "_ud", 0) == 0 and not setattr(node, "_ud", 1) if False else self._loop_once(node)
+        return (
+            getattr(node, "_ud", 0) == 0 and not setattr(node, "_ud", 1)
+            if False
+            else self._loop_once(node)
+        )
 
     def _loop_once(self, node):
         # неизвестное условие цикла: выполняем тело один раз за вход в оператор
@@ -762,17 +1082,21 @@ class Interp:
         txt = expr_text(e)
         return heuristic_polarity(txt)
 
-    # ------------------------------------------------------------------------------------------ выражения
+    # ------------------------------------------------------------------------------------------
+    # выражения
     def ev(self, e, fr):
+        """Вычисляет выражение в кадре ``fr``."""
         h = self._ev_table.get(type(e))
         if h is None:
             raise NotImplementedError(f"выражение {type(e).__name__}")
         return h(self, e, fr)
 
     def ev_lit(self, e, fr):
+        """Возвращает значение литерала."""
         return e.val
 
     def ev_name(self, e, fr):
+        """Вычисляет имя: переменная, поле или класс."""
         nm = e.id
         f = fr
         while f is not None:
@@ -790,6 +1114,7 @@ class Interp:
         return UNK
 
     def lookup_field_ctx(self, nm, fr):
+        """Находит поле по имени у ``this`` и внешних объектов."""
         this = fr.this
         f = fr
         while f is not None and this is None:
@@ -825,15 +1150,25 @@ class Interp:
         return NOTFOUND
 
     def class_ref(self, nm, ctx):
+        """Возвращает ссылку на класс по имени в контексте ``ctx``."""
         if ctx is None:
             return None
         ci = self.p.resolve(nm, ctx)
         if ci is not None:
             return StaticRef(ci, nm)
-        return StaticRef(None, nm) if nm[:1].isupper() or nm in ("java", "javax", "org", "com") else None
+        return (
+            StaticRef(None, nm)
+            if nm[:1].isupper() or nm in ("java", "javax", "org", "com")
+            else None
+        )
 
     def ev_field(self, e, fr):
-        o = self.ev(e.obj, fr) if not (isinstance(e.obj, Name) and self._is_pkg(e.obj.id, fr)) else StaticRef(None, e.obj.id)
+        """Вычисляет обращение к полю через точку."""
+        o = (
+            self.ev(e.obj, fr)
+            if not (isinstance(e.obj, Name) and self._is_pkg(e.obj.id, fr))
+            else StaticRef(None, e.obj.id)
+        )
         nm = e.name
         if isinstance(o, StaticRef):
             if o.ci is not None:
@@ -851,7 +1186,9 @@ class Interp:
             return UNK
         if o is None:
             self.warn("NPE field " + nm)
-            raise JavaThrow(self.make_exc("NullPointerException", f"field {nm} of null"))
+            raise JavaThrow(
+                self.make_exc("NullPointerException", f"field {nm} of null")
+            )
         if isinstance(o, (JObj, JEnum)):
             if nm in o.f:
                 return o.f[nm]
@@ -873,6 +1210,7 @@ class Interp:
         return False
 
     def ev_this(self, e, fr):
+        """Возвращает ``this`` текущего кадра."""
         f = fr
         while f is not None:
             if f.this is not None:
@@ -881,6 +1219,7 @@ class Interp:
         return None
 
     def ev_unary(self, e, fr):
+        """Вычисляет унарный оператор."""
         op = e.op
         if op in ("++", "--"):
             old = self.ev(e.e, fr)
@@ -901,47 +1240,52 @@ class Interp:
         return UNK
 
     def ev_postfix(self, e, fr):
+        """Вычисляет ``x++`` и ``x--``."""
         old = self.ev(e.e, fr)
         new = lib.arith("+" if e.op == "++" else "-", old, 1)
         self.assign_to(e.e, new, fr)
         return old
 
     def ev_binary(self, e, fr):
+        """Вычисляет бинарный оператор (с ленивыми ``&&`` и ``||``)."""
         op = e.op
         if op == "&&":
-            l = self.ev(e.l, fr)
-            if l is UNK:
-                r = self.ev(e.r, fr)
-                if r is UNK or r:
+            left = self.ev(e.l, fr)
+            if left is UNK:
+                right = self.ev(e.r, fr)
+                if right is UNK or right:
                     return UNK
                 return False
-            if not l:
+            if not left:
                 return False
             return self.ev(e.r, fr)
         if op == "||":
-            l = self.ev(e.l, fr)
-            if l is UNK:
-                r = self.ev(e.r, fr)
-                if r is UNK or not r:
+            left = self.ev(e.l, fr)
+            if left is UNK:
+                right = self.ev(e.r, fr)
+                if right is UNK or not right:
                     return UNK
                 return True
-            if l:
+            if left:
                 return True
             return self.ev(e.r, fr)
-        l = self.ev(e.l, fr)
-        r = self.ev(e.r, fr)
-        return lib.binop(self, op, l, r)
+        left = self.ev(e.l, fr)
+        right = self.ev(e.r, fr)
+        return lib.binop(self, op, left, right)
 
     def ev_cond(self, e, fr):
+        """Вычисляет условный оператор ``c ? a : b``."""
         c = self.ev(e.c, fr)
         if c is UNK:
             c = self.decide_cond_expr(e, fr)
         return self.ev(e.a if c else e.b, fr)
 
     def decide_cond_expr(self, e, fr):
+        """Угадывает ветвь условного оператора с неизвестным условием."""
         return heuristic_polarity(expr_text(e.c))
 
     def ev_cast(self, e, fr):
+        """Вычисляет приведение типа."""
         v = self.ev(e.e, fr)
         t = strip_generics(e.type)
         if v is UNK or v is None:
@@ -957,6 +1301,7 @@ class Interp:
         return v
 
     def ev_instanceof(self, e, fr):
+        """Вычисляет ``instanceof``."""
         v = self.ev(e.e, fr)
         if v is UNK:
             return UNK
@@ -978,6 +1323,7 @@ class Interp:
         return r
 
     def ev_index(self, e, fr):
+        """Вычисляет обращение к элементу массива."""
         o = self.ev(e.obj, fr)
         i = self.ev(e.idx, fr)
         if o is UNK or i is UNK or o is None:
@@ -988,9 +1334,11 @@ class Interp:
             return UNK
 
     def ev_arraylit(self, e, fr):
+        """Вычисляет литерал массива."""
         return JList(self.ev(x, fr) for x in e.elems)
 
     def ev_newarray(self, e, fr):
+        """Создаёт массив оператором ``new``."""
         if e.init is not None:
             return JList(self.ev(x, fr) for x in e.init.elems)
         n = 0
@@ -1001,9 +1349,11 @@ class Interp:
         return JList([PRIM_DEFAULT.get(e.type, None)] * n)
 
     def ev_lambda(self, e, fr):
+        """Создаёт значение лямбды с захваченным окружением."""
         return JLambda(e.params, e.body, fr, fr)
 
     def ev_methodref(self, e, fr):
+        """Создаёт значение ссылки на метод."""
         o = e.obj
         if isinstance(o, Name):
             v = self.ev(o, fr)
@@ -1014,25 +1364,34 @@ class Interp:
         return JMethodRef(v, e.name)
 
     def ev_classlit(self, e, fr):
+        """Возвращает литерал класса ``X.class``."""
         if isinstance(e.type, str):
             return JClass(self.p.resolve(e.type, fr.cls), e.type)
-        v = self.ev(e.type, fr) if not isinstance(e.type, Name) else self.class_ref(e.type.id, fr.cls)
+        v = (
+            self.ev(e.type, fr)
+            if not isinstance(e.type, Name)
+            else self.class_ref(e.type.id, fr.cls)
+        )
         if isinstance(v, StaticRef):
             return JClass(v.ci, v.name)
         return JClass(None, "?")
 
     def ev_typeexpr(self, e, fr):
+        """Возвращает ссылку на тип в позиции выражения."""
         return StaticRef(self.p.resolve(e.type, fr.cls), e.type)
 
     def ev_super(self, e, fr):
+        """Возвращает ``this`` для обращения через ``super``."""
         return self.ev_this(e, fr)
 
     def ev_switchexpr(self, e, fr):
         # switch как выражение: результат последнего выражения выбранной ветви
+        """Возвращает UNK для выражения ``switch`` (в проекте их нет)."""
         return UNK
 
     # --- присваивания
     def ev_assign(self, e, fr):
+        """Вычисляет присваивание, в том числе составное (``+=``)."""
         op = e.op
         if op == "=":
             v = self.ev_init(e.value, fr, None)
@@ -1044,6 +1403,7 @@ class Interp:
         return v
 
     def assign_to(self, tgt, v, fr):
+        """Записывает значение в переменную, поле или элемент массива."""
         if isinstance(tgt, Name):
             nm = tgt.id
             f = fr
@@ -1063,7 +1423,11 @@ class Interp:
                 if isinstance(obj, JObj) and nm in obj.f:
                     obj.f[nm] = v
                     return
-                if isinstance(obj, JObj) and isinstance(obj.tag, dict) and obj.tag.get("outer") is not None:
+                if (
+                    isinstance(obj, JObj)
+                    and isinstance(obj.tag, dict)
+                    and obj.tag.get("outer") is not None
+                ):
                     obj = obj.tag["outer"]
                     continue
                 break
@@ -1091,12 +1455,16 @@ class Interp:
 
     # --- вызовы
     def ev_new(self, e, fr):
+        """Создаёт объект оператором ``new`` (проектный или библиотечный)."""
         args = [self.ev(a, fr) for a in e.args]
         caller = fr.method
         tname = e.type
         base = strip_generics(tname)
         ci = self.p.resolve(tname, fr.cls)
-        if e.body is not None and base.split(".")[-1] in ("ParameterizedTypeReference", "TypeReference"):
+        if e.body is not None and base.split(".")[-1] in (
+            "ParameterizedTypeReference",
+            "TypeReference",
+        ):
             ta = type_args(tname)
             return LibObj("PTR", type=ta[0] if ta else None, ctx=fr.cls)
         if e.body is not None:
@@ -1116,7 +1484,11 @@ class Interp:
             if ci.kind == "interface" or "abstract" in ci.decl.mods:
                 return UNK
             obj = JObj(ci, self.default_fields(ci))
-            if ci.outer is not None and "static" not in ci.decl.mods and ci.kind != "enum":
+            if (
+                ci.outer is not None
+                and "static" not in ci.decl.mods
+                and ci.kind != "enum"
+            ):
                 obj.tag = {"outer": fr.this}
             saved_o = self.origin
             self.origin = "new"
@@ -1128,6 +1500,7 @@ class Interp:
         return lib.new_lib(self, base, tname, args, fr)
 
     def ev_call(self, e, fr):
+        """Вычисляет вызов метода."""
         name = e.name
         caller = fr.method
         # --- целевой объект
@@ -1140,10 +1513,16 @@ class Interp:
             sup = self.p.super_of(fr.cls)
             cands = []
             if sup is not None:
-                cands = [m for m in self.p.find_methods(sup, name) if not m.abstract]
+                cands = [
+                    m for m in self.p.find_methods(sup, name) if not m.abstract
+                ]
             if not cands:
                 for i in self.p.ifaces_of(fr.cls):
-                    cands += [m for m in self.p.find_methods(i, name) if not m.abstract]
+                    cands += [
+                        m
+                        for m in self.p.find_methods(i, name)
+                        if not m.abstract
+                    ]
             mi = self.pick_overload(cands, args)
             if mi is not None:
                 return self.invoke(mi, this, args, caller)
@@ -1151,7 +1530,10 @@ class Interp:
         if isinstance(e.obj, Name) and self._is_pkg(e.obj.id, fr):
             recv = StaticRef(None, e.obj.id)
         elif isinstance(e.obj, FieldAcc) and self._pkg_chain(e.obj, fr):
-            recv = StaticRef(self.p.lookup_fqn(fr.module, self._pkg_chain(e.obj, fr)), e.obj.name)
+            recv = StaticRef(
+                self.p.lookup_fqn(fr.module, self._pkg_chain(e.obj, fr)),
+                e.obj.name,
+            )
         else:
             recv = self.ev(e.obj, fr)
         args = [self.ev(a, fr) for a in e.args]
@@ -1169,7 +1551,7 @@ class Interp:
         return None
 
     def call_implicit(self, name, args, fr):
-        """Вызов без явного получателя: метод this/внешнего/родительского класса."""
+        """Вызывает метод без получателя: у this, внешнего или родителя."""
         caller = fr.method
         this = fr.this
         f = fr
@@ -1182,7 +1564,9 @@ class Interp:
         ci = fr.cls
         while ci is not None and guard < 6:
             guard += 1
-            cands = [m for m in self.p.find_methods(ci, name) if not m.abstract]
+            cands = [
+                m for m in self.p.find_methods(ci, name) if not m.abstract
+            ]
             if cands:
                 mi = self.pick_overload(cands, args)
                 if mi is not None:
@@ -1196,7 +1580,11 @@ class Interp:
                             return r
                     return self.invoke(mi, tgt, args, caller)
             # анонимный/внутренний: пробуем внешний объект
-            if isinstance(obj, JObj) and isinstance(obj.tag, dict) and obj.tag.get("outer") is not None:
+            if (
+                isinstance(obj, JObj)
+                and isinstance(obj.tag, dict)
+                and obj.tag.get("outer") is not None
+            ):
                 obj = obj.tag["outer"]
             ci = ci.outer
         if isinstance(this, JObj):
@@ -1218,11 +1606,14 @@ class Interp:
                     if ok:
                         return r
                 else:
-                    return lib.static_call(self, head.split(".")[-1], name, args, fr)
+                    return lib.static_call(
+                        self, head.split(".")[-1], name, args, fr
+                    )
         self.warn(f"implicit? {name}")
         return UNK
 
     def call_on(self, recv, name, args, fr, node=None):
+        """Вызывает метод ``name`` у получателя ``recv``."""
         caller = fr.method
         if recv is UNK:
             return UNK
@@ -1236,7 +1627,14 @@ class Interp:
             return lib.static_call(self, recv.name, name, args, fr)
         if recv is None:
             self.warn(f"NPE call {name}")
-            raise JavaThrow(self.make_exc("NullPointerException", f"call {name} on null @{(fr.cls.file.split('/')[-1] if fr.cls else '?')}:{getattr(node, 'line', '?')}"))
+            where = fr.cls.file.split("/")[-1] if fr.cls else "?"
+            line = getattr(node, "line", "?")
+            raise JavaThrow(
+                self.make_exc(
+                    "NullPointerException",
+                    f"call {name} on null @{where}:{line}",
+                )
+            )
         if isinstance(recv, JObj):
             ok, r = self.call_virtual(recv, name, args, caller)
             if ok:
@@ -1249,7 +1647,9 @@ class Interp:
         if isinstance(recv, JEnum):
             ci = recv.cls
             ok, r = False, None
-            cands = [m for m in self.p.find_methods(ci, name) if not m.abstract]
+            cands = [
+                m for m in self.p.find_methods(ci, name) if not m.abstract
+            ]
             mi = self.pick_overload(cands, args)
             if mi is not None:
                 return self.invoke(mi, recv, args, caller)
@@ -1260,7 +1660,10 @@ class Interp:
         return lib.call_builtin(self, recv, name, args, fr, node)
 
     def ev_new_lambda_call(self, fn, args, fr=None):
-        """Вызов функционального значения (JLambda / JMethodRef / объект с одним методом)."""
+        """Вызывает функциональное значение: лямбду или ссылку на метод.
+
+        Подходит и объект проекта с единственным методом.
+        """
         if isinstance(fn, JLambda):
             f2 = Frame(fn.frame.method, fn.frame.this, fn.frame.cls, up=fn.env)
             for p, a in zip(fn.params, args):
@@ -1282,12 +1685,26 @@ class Interp:
                     if ok:
                         return r
                     if args:
-                        return self.call_on(args[0], fn.name, args[1:], self.stack[-1] if self.stack else Frame(None, None, None))
+                        return self.call_on(
+                            args[0],
+                            fn.name,
+                            args[1:],
+                            (
+                                self.stack[-1]
+                                if self.stack
+                                else Frame(None, None, None)
+                            ),
+                        )
                     return UNK
                 return lib.static_call_ref(self, o.name, fn.name, args)
             if args and o is None:
                 return UNK
-            return self.call_on(o, fn.name, args, self.stack[-1] if self.stack else Frame(None, None, None))
+            return self.call_on(
+                o,
+                fn.name,
+                args,
+                self.stack[-1] if self.stack else Frame(None, None, None),
+            )
         if isinstance(fn, JObj):
             for m in self.p.supertypes(fn.cls):
                 for ms in m.methods.values():
@@ -1296,16 +1713,15 @@ class Interp:
                             return self.invoke(mi, fn, args, None)
         return UNK
 
-    # ------------------------------------------------------------------------------------------ вспомогательное
+    # ------------------------------------------------------------------------------------------
+    # вспомогательное
     def to_str(self, v, implicit=True):
-        """Строковое представление; неявный toString проектных классов фиксируется как executes."""
+        """Возвращает строку значения; явный toString класса исполняется."""
         return lib.to_str(self, v)
 
 
-
-
 def expr_text(e, depth=0):
-    """Компактное текстовое представление выражения (для журнала и эвристик)."""
+    """Возвращает короткий текст выражения для журнала и эвристик."""
     if depth > 6:
         return "…"
     t = type(e)
@@ -1316,9 +1732,17 @@ def expr_text(e, depth=0):
     if t is FieldAcc:
         return expr_text(e.obj, depth + 1) + "." + e.name
     if t is Call:
-        return (expr_text(e.obj, depth + 1) + "." if e.obj is not None else "") + e.name + "(" + ",".join(expr_text(a, depth + 1) for a in e.args) + ")"
+        return (
+            (expr_text(e.obj, depth + 1) + "." if e.obj is not None else "")
+            + e.name
+            + "("
+            + ",".join(expr_text(a, depth + 1) for a in e.args)
+            + ")"
+        )
     if t is Binary:
-        return f"({expr_text(e.l, depth + 1)} {e.op} {expr_text(e.r, depth + 1)})"
+        return (
+            f"({expr_text(e.l, depth + 1)} {e.op} {expr_text(e.r, depth + 1)})"
+        )
     if t is Unary:
         return e.op + expr_text(e.e, depth + 1)
     if t is New:
@@ -1338,7 +1762,11 @@ ERR_LOG = re.compile(r"error|warn", re.I)
 
 
 def branch_score(st):
-    """Насколько ветвь «ошибочная»: throw, return Response(0,..), LOGGER.error/warn, return null."""
+    """Оценивает, насколько ветвь «ошибочная».
+
+    Признаки ошибки: ``throw``, ``return Response(0, …)``, запись в журнал
+    ошибок или предупреждений, ``return null``.
+    """
     sc = 0
     stack = [st]
     while stack:
@@ -1349,17 +1777,32 @@ def branch_score(st):
             sc += 10
         elif isinstance(n, Return):
             e = n.e
-            if isinstance(e, New) and e.args and isinstance(e.args[0], Lit) and e.args[0].val == 0 and "Response" in e.type:
+            if (
+                isinstance(e, New)
+                and e.args
+                and isinstance(e.args[0], Lit)
+                and e.args[0].val == 0
+                and "Response" in e.type
+            ):
                 sc += 10
             elif isinstance(e, Lit) and e.kind == "null":
                 sc += 4
-        elif isinstance(n, ExprStmt) and isinstance(n.e, Call) and n.e.obj is not None and isinstance(n.e.obj, Name):
-            if n.e.obj.id in ("LOGGER", "logger", "log") and n.e.name in ("error", "warn"):
+        elif (
+            isinstance(n, ExprStmt)
+            and isinstance(n.e, Call)
+            and n.e.obj is not None
+            and isinstance(n.e.obj, Name)
+        ):
+            if n.e.obj.id in ("LOGGER", "logger", "log") and n.e.name in (
+                "error",
+                "warn",
+            ):
                 sc += 1
         elif isinstance(n, Block):
             stack.extend(n.stmts)
         elif isinstance(n, If):
-            stack.append(n.then); stack.append(n.els)
+            stack.append(n.then)
+            stack.append(n.els)
         elif isinstance(n, (For, ForEach, While, DoWhile)):
             stack.append(n.body)
         elif isinstance(n, Try):
@@ -1368,9 +1811,17 @@ def branch_score(st):
 
 
 def heuristic_polarity(txt):
-    """Если ветви равноценны: по тексту условия угадать, чаще ли оно истинно."""
+    """Угадывает по тексту условия, чаще ли оно истинно.
+
+    Применяется, когда обе ветви одинаково «безошибочны».
+    """
     t = txt
-    if re.search(r"isPresent\(\)|!= *None|isEmpty\(\)\)|\.size\(\) *>|>= *1", t) and "!" not in t[:2]:
+    if (
+        re.search(
+            r"isPresent\(\)|!= *None|isEmpty\(\)\)|\.size\(\) *>|>= *1", t
+        )
+        and "!" not in t[:2]
+    ):
         return True
     if re.search(r"== *None|isEmpty\(\)|\.size\(\) *==|<= *0", t):
         return False
@@ -1378,17 +1829,47 @@ def heuristic_polarity(txt):
 
 
 Interp._ex_table = {
-    Block: Interp.ex_block, LocalVar: Interp.ex_local, ExprStmt: Interp.ex_expr, If: Interp.ex_if, While: Interp.ex_while,
-    DoWhile: Interp.ex_dowhile, For: Interp.ex_for, ForEach: Interp.ex_foreach, Return: Interp.ex_return,
-    Throw: Interp.ex_throw, Break: Interp.ex_break, Continue: Interp.ex_continue, Try: Interp.ex_try,
-    Switch: Interp.ex_switch, Sync: Interp.ex_sync, Labeled: Interp.ex_labeled, Empty: Interp.ex_noop,
-    Assert: Interp.ex_assert, LocalClass: Interp.ex_noop,
+    Block: Interp.ex_block,
+    LocalVar: Interp.ex_local,
+    ExprStmt: Interp.ex_expr,
+    If: Interp.ex_if,
+    While: Interp.ex_while,
+    DoWhile: Interp.ex_dowhile,
+    For: Interp.ex_for,
+    ForEach: Interp.ex_foreach,
+    Return: Interp.ex_return,
+    Throw: Interp.ex_throw,
+    Break: Interp.ex_break,
+    Continue: Interp.ex_continue,
+    Try: Interp.ex_try,
+    Switch: Interp.ex_switch,
+    Sync: Interp.ex_sync,
+    Labeled: Interp.ex_labeled,
+    Empty: Interp.ex_noop,
+    Assert: Interp.ex_assert,
+    LocalClass: Interp.ex_noop,
 }
 Interp._ev_table = {
-    Lit: Interp.ev_lit, Name: Interp.ev_name, FieldAcc: Interp.ev_field, Call: Interp.ev_call, New: Interp.ev_new,
-    NewArray: Interp.ev_newarray, ArrayLit: Interp.ev_arraylit, Index: Interp.ev_index, Unary: Interp.ev_unary,
-    Postfix: Interp.ev_postfix, Binary: Interp.ev_binary, Assign: Interp.ev_assign, Cond: Interp.ev_cond,
-    Cast: Interp.ev_cast, InstanceOf: Interp.ev_instanceof, Lambda: Interp.ev_lambda, MethodRef: Interp.ev_methodref,
-    This: Interp.ev_this, Super: Interp.ev_super, ClassLit: Interp.ev_classlit, TypeExpr: Interp.ev_typeexpr,
+    Lit: Interp.ev_lit,
+    Name: Interp.ev_name,
+    FieldAcc: Interp.ev_field,
+    Call: Interp.ev_call,
+    New: Interp.ev_new,
+    NewArray: Interp.ev_newarray,
+    ArrayLit: Interp.ev_arraylit,
+    Index: Interp.ev_index,
+    Unary: Interp.ev_unary,
+    Postfix: Interp.ev_postfix,
+    Binary: Interp.ev_binary,
+    Assign: Interp.ev_assign,
+    Cond: Interp.ev_cond,
+    Cast: Interp.ev_cast,
+    InstanceOf: Interp.ev_instanceof,
+    Lambda: Interp.ev_lambda,
+    MethodRef: Interp.ev_methodref,
+    This: Interp.ev_this,
+    Super: Interp.ev_super,
+    ClassLit: Interp.ev_classlit,
+    TypeExpr: Interp.ev_typeexpr,
     Switch: Interp.ev_switchexpr,
 }

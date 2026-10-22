@@ -1,13 +1,26 @@
-"""Репозитории Spring Data поверх БД в памяти: производные запросы по имени метода, ORM-таблицы коллекций,
-учёт обращений к таблицам (data)."""
-import re, collections
-from values import *
-import config as _cfg
-from model import strip_generics, type_args, PRIM_DEFAULT
-from jparse import Lit, Name, FieldAcc
+"""Репозитории Spring Data поверх базы данных в памяти.
+
+Модуль выполняет производные запросы по имени метода (``findByXAndY``),
+загружает сущности как Hibernate (конструктор, кэш сессии, ленивые
+коллекции в отдельных таблицах) и отмечает обращения к таблицам — рёбра
+``data``.
+"""
+
+import re
+
+from . import config as _cfg
+from .model import PRIM_DEFAULT, strip_generics, type_args
+from .values import UNK, JEnum, JList, JObj, JOpt, JSet
+
+# Имя производного запроса Spring Data: действие, модификаторы и условие.
+DERIVED_QUERY = re.compile(
+    r"^(find|get|read|query|count|exists|delete|remove)(Distinct)?"
+    r"(First\d*|Top\d*)?(All)?(?:\w*?)By(.*)$"
+)
 
 
 def snake(s):
+    """Переводит имя из CamelCase в snake_case (имя колонки по умолчанию)."""
     s = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", s)
     return s.lower()
 
@@ -32,7 +45,10 @@ def _top_level(args):
 
 
 def ann_str(args, key=None):
-    """Значение строкового аргумента аннотации: (name = "x") / ("x") — только верхний уровень."""
+    """Возвращает строковый аргумент аннотации верхнего уровня.
+
+    Понимает формы ``(name = "x")`` и ``("x")``.
+    """
     if not args:
         return None
     args = _top_level(args)
@@ -46,16 +62,23 @@ def ann_str(args, key=None):
 
 
 class RepoProxy:
+    """Бин репозитория: интерфейс, класс сущности и её описание."""
+
     __slots__ = ("ci", "entity", "meta")
 
     def __init__(self, ci, entity, meta):
+        """Связывает интерфейс репозитория с сущностью ``entity``."""
         self.ci, self.entity, self.meta = ci, entity, meta
 
 
 class LazyColl(JList):
-    """Лениво загружаемая коллекция сущности: первое обращение даёт SQL к таблице коллекции."""
+    """Лениво загружаемая коллекция сущности.
+
+    Первое обращение к элементам даёт SQL к таблице коллекции.
+    """
 
     def __init__(self, items, on_touch):
+        """Создаёт коллекцию; ``on_touch`` вызывается при первом доступе."""
         super().__init__(items)
         self._cb = on_touch
 
@@ -66,32 +89,41 @@ class LazyColl(JList):
             cb()
 
     def __iter__(self):
+        """Перебирает элементы, загрузив коллекцию."""
         self._t()
         return super().__iter__()
 
     def __len__(self):
+        """Возвращает размер, загрузив коллекцию."""
         self._t()
         return super().__len__()
 
     def __getitem__(self, i):
+        """Возвращает элемент, загрузив коллекцию."""
         self._t()
         return super().__getitem__(i)
 
     def __contains__(self, x):
+        """Проверяет вхождение, загрузив коллекцию."""
         self._t()
         return super().__contains__(x)
 
     def append(self, x):
+        """Добавляет элемент, загрузив коллекцию."""
         self._t()
         super().append(x)
 
     def __bool__(self):
+        """Проверяет непустоту, загрузив коллекцию."""
         self._t()
         return super().__len__() > 0
 
 
 class EntityMeta:
+    """Отображение сущности JPA на таблицы: колонки, ключ, коллекции."""
+
     def __init__(self, ci, it):
+        """Строит отображение по аннотациям класса сущности ``ci``."""
         self.ci = ci
         self.it = it
         p = it.p
@@ -101,9 +133,11 @@ class EntityMeta:
         self.table = it.tables.get(self.table_name)
         self.table_node = self._node(self.table_name, ci)
         self.id_field = None
-        self.cols = []                 # (field, col, type)
-        self.embedded = []             # (field, embedded ClassInfo)
-        self.colls = []                # dict(field, table, node, join, valcol, elem_type, eager)
+        self.cols = []  # (field, col, type)
+        self.embedded = []  # (field, embedded ClassInfo)
+        self.colls = (
+            []
+        )  # dict(field, table, node, join, valcol, elem_type, eager)
         for f in p.all_fields(ci):
             if "Transient" in f.annots or f.static:
                 continue
@@ -128,15 +162,29 @@ class EntityMeta:
                             break
                 et = type_args(f.type)[0] if type_args(f.type) else "String"
                 eager = "EAGER" in f.annots["ElementCollection"]
-                self.colls.append(dict(field=f.name, table=tbl, name=ctab, node=self._node(ctab, ci), join=join,
-                                       elem=et, eager=eager, set=strip_generics(f.type) in ("Set", "HashSet")))
+                self.colls.append(
+                    dict(
+                        field=f.name,
+                        table=tbl,
+                        name=ctab,
+                        node=self._node(ctab, ci),
+                        join=join,
+                        elem=et,
+                        eager=eager,
+                        set=strip_generics(f.type) in ("Set", "HashSet"),
+                    )
+                )
                 continue
             if "Embedded" in f.annots or "EmbeddedId" in f.annots:
                 eci = p.resolve(f.type, f.cls)
                 if eci is not None:
                     self.embedded.append((f.name, eci))
                     continue
-            col = ann_str(f.annots.get("Column"), "name") if f.annots.get("Column") else None
+            col = (
+                ann_str(f.annots.get("Column"), "name")
+                if f.annots.get("Column")
+                else None
+            )
             self.cols.append((f.name, col or snake(f.name), f.type, f))
 
     def _node(self, tname, ci):
@@ -145,7 +193,9 @@ class EntityMeta:
             if p.tables[k]["name"] == tname:
                 return k
         for k, n in p.tables.items():
-            if n["name"] == tname and n.get("schema", "").startswith(ci.module.split("-service")[0]):
+            if n["name"] == tname and n.get("schema", "").startswith(
+                ci.module.split("-service")[0]
+            ):
                 return k
         for k, n in p.tables.items():
             if n["name"] == tname:
@@ -154,20 +204,28 @@ class EntityMeta:
 
 
 class Repos:
+    """Все репозитории Spring Data проекта поверх базы в памяти."""
+
     def __init__(self, it):
+        """Подключает репозитории к интерпретатору ``it``."""
         self.it = it
         self.metas = {}
         self.proxies = {}
         it.repos = self
 
     def is_repo(self, tci):
+        """Проверяет, что интерфейс — репозиторий Spring Data."""
         if tci.kind != "interface":
             return False
-        return any(re.search(r"Repository\b", n) for n in tci.iface_names) or \
-            any(self.is_repo(i) for i in self.it.p.ifaces_of(tci))
+        return any(
+            re.search(r"Repository\b", n) for n in tci.iface_names
+        ) or any(self.is_repo(i) for i in self.it.p.ifaces_of(tci))
 
     def entity_of(self, tci):
-        """Тип сущности — первый параметр Repository<Entity, Id> (в самом интерфейсе или предках)."""
+        """Возвращает тип сущности из ``Repository<Entity, Id>``.
+
+        Параметр ищется в самом интерфейсе и в его предках.
+        """
         for n in tci.iface_names:
             if "Repository" in n:
                 ta = type_args(n)
@@ -180,27 +238,35 @@ class Repos:
         return None
 
     def proxy(self, tci):
+        """Возвращает бин репозитория для интерфейса, создавая его один раз."""
         px = self.proxies.get(tci)
         if px is None:
             ent = self.entity_of(tci)
-            px = RepoProxy(tci, ent, self.meta(ent) if ent is not None else None)
+            px = RepoProxy(
+                tci, ent, self.meta(ent) if ent is not None else None
+            )
             self.proxies[tci] = px
         return px
 
     def meta(self, ent):
+        """Возвращает отображение сущности на таблицы (с кэшем)."""
         m = self.metas.get(ent)
         if m is None:
             m = EntityMeta(ent, self.it)
             self.metas[ent] = m
         return m
 
-    # ------------------------------------------------------------------ учёт обращений
+    # ------------------------------------------------------------------ учёт
+    # обращений
     def touch(self, caller, node):
+        """Отмечает ребро ``data`` от вызывающего метода к таблице."""
         if caller is not None and caller.id and node:
             self.it.trace.data.add((caller.id, node))
 
-    # ------------------------------------------------------------------ строка <-> сущность
+    # ------------------------------------------------------------------ строка
+    # <-> сущность
     def conv_in(self, raw, ftype, ctx):
+        """Переводит значение колонки в значение поля Java типа ``ftype``."""
         t = strip_generics(ftype)
         if raw is None:
             return PRIM_DEFAULT.get(t, None)
@@ -231,10 +297,20 @@ class Repos:
         return raw
 
     def conv_out(self, v, ftype, f=None):
+        """Переводит значение поля Java в значение колонки."""
         if isinstance(v, JEnum):
-            if f is not None and "Enumerated" in f.annots and "STRING" in f.annots["Enumerated"]:
+            if (
+                f is not None
+                and "Enumerated" in f.annots
+                and "STRING" in f.annots["Enumerated"]
+            ):
                 return v.name
-            return v.ordinal if (f is None or "Enumerated" not in f.annots) and not self._enum_str(f) else v.name
+            return (
+                v.ordinal
+                if (f is None or "Enumerated" not in f.annots)
+                and not self._enum_str(f)
+                else v.name
+            )
         if isinstance(v, bool):
             return 1 if v else 0
         if v is UNK:
@@ -245,8 +321,11 @@ class Repos:
         return f is not None and f.annots.get("Convert") is not None
 
     def load(self, meta, row, caller):
-        """Строка -> сущность. Конструктор по умолчанию выполняется (как в Hibernate).
-        Повторная загрузка той же строки в рамках запроса (OSIV) возвращает уже загруженный объект."""
+        """Превращает строку таблицы в сущность, как это делает Hibernate.
+
+        Конструктор по умолчанию выполняется. Повторная загрузка той же
+        строки в рамках запроса (OSIV) возвращает уже загруженный объект.
+        """
         sess = self.it.session
         key = (meta.table_name, row.get(self._idcol(meta)))
         cached = sess.get(key)
@@ -273,7 +352,11 @@ class Repos:
             sub = JObj(eci, it.default_fields(eci))
             it._run_ctor(eci, sub, [], None, None)
             for sf in it.p.all_fields(eci):
-                col = ann_str(sf.annots.get("Column"), "name") if sf.annots.get("Column") else None
+                col = (
+                    ann_str(sf.annots.get("Column"), "name")
+                    if sf.annots.get("Column")
+                    else None
+                )
                 col = col or snake(sf.name)
                 if col in row:
                     sub.f[sf.name] = self.conv_in(row[col], sf.type, sf.cls)
@@ -292,13 +375,17 @@ class Repos:
             if c["eager"]:
                 if items or True:
                     self.touch(caller, c["node"])
-                obj.f[c["field"]] = JSet({hk_(x): x for x in items}) if c["set"] else JList(items)
+                obj.f[c["field"]] = (
+                    JSet({hk_(x): x for x in items})
+                    if c["set"]
+                    else JList(items)
+                )
             else:
                 node = c["node"]
-                holder = obj
 
                 def on_touch(node=node, obj=obj, meta=meta):
                     self.touch(self._attr_method(obj), node)
+
                 lc = LazyColl(items, on_touch)
                 lc.tag_owner = None if False else None
                 obj.f[c["field"]] = lc
@@ -311,13 +398,30 @@ class Repos:
         return obj
 
     def _attr_method(self, obj):
-        """Метод, которому приписывается ленивый SQL: ближайший не-сущностный проектный кадр, иначе загрузивший метод."""
+        """Возвращает метод, которому приписывается ленивый SQL.
+
+        Это ближайший кадр проекта вне сущностей, иначе метод, загрузивший
+        сущность.
+        """
         it = self.it
         if it.web is not None and it.web.in_serialization:
-            # Jackson читает коллекцию после возврата из метода проекта: в эталоне такой SQL ни к какому методу не относится
-            return None if _cfg.DROP_SERIALIZATION_LAZY_SQL else (obj.tag.get("loader") if isinstance(obj.tag, dict) else None)
+            # Jackson читает коллекцию после возврата из метода проекта: в
+            # эталоне такой SQL ни к какому методу не относится
+            return (
+                None
+                if _cfg.DROP_SERIALIZATION_LAZY_SQL
+                else (
+                    obj.tag.get("loader")
+                    if isinstance(obj.tag, dict)
+                    else None
+                )
+            )
         for fr in reversed(it.stack):
-            if fr.method is not None and "Entity" not in fr.method.cls.annots and fr.method.id:
+            if (
+                fr.method is not None
+                and "Entity" not in fr.method.cls.annots
+                and fr.method.id
+            ):
                 return fr.method
         return obj.tag.get("loader") if isinstance(obj.tag, dict) else None
 
@@ -348,18 +452,29 @@ class Repos:
         return "id"
 
     def to_row(self, meta, obj):
+        """Переводит сущность в строку таблицы."""
         row = {}
         for fname, col, ftype, f in meta.cols:
             row[col] = self.conv_out(obj.f.get(fname), ftype, f)
         for fname, eci in meta.embedded:
             sub = obj.f.get(fname)
             for sf in self.it.p.all_fields(eci):
-                col = ann_str(sf.annots.get("Column"), "name") if sf.annots.get("Column") else None
-                row[col or snake(sf.name)] = self.conv_out(sub.f.get(sf.name) if isinstance(sub, JObj) else None, sf.type, sf)
+                col = (
+                    ann_str(sf.annots.get("Column"), "name")
+                    if sf.annots.get("Column")
+                    else None
+                )
+                row[col or snake(sf.name)] = self.conv_out(
+                    sub.f.get(sf.name) if isinstance(sub, JObj) else None,
+                    sf.type,
+                    sf,
+                )
         return row
 
-    # ------------------------------------------------------------------ вызовы репозитория
+    # ------------------------------------------------------------------ вызовы
+    # репозитория
     def call(self, px, name, args, fr):
+        """Выполняет метод репозитория: стандартный или производный запрос."""
         it = self.it
         caller = fr.method if fr is not None else None
         meta = px.meta
@@ -369,7 +484,6 @@ class Repos:
             it.warn(f"no table {meta.table_name}")
             return UNK
         m = self._decl(px, name, len(args))
-        ret = strip_generics(m.ret) if m is not None and m.ret else None
         rt_full = m.ret if m is not None else None
         # --- стандартные методы
         if name in ("save", "saveAndFlush"):
@@ -383,18 +497,45 @@ class Repos:
             self._delete_rows(meta, [self._id_of(meta, args[0])], caller)
             return None
         if name == "deleteAll":
-            self._delete_rows(meta, [r.get(self._idcol(meta)) for r in list(meta.table.rows)], caller)
+            self._delete_rows(
+                meta,
+                [r.get(self._idcol(meta)) for r in list(meta.table.rows)],
+                caller,
+            )
             return None
         if name in ("deleteById", "removeById"):
             self._delete_rows(meta, [args[0]], caller)
             return None
         if name == "findById":
             hit = self.it.session.get((meta.table_name, args[0]))
-            if hit is not None:                       # кэш первого уровня: SQL не выполняется
-                return JOpt(hit) if strip_generics(rt_full or "") == "Optional" else hit
-            return self._wrap(rt_full, self._find(meta, [(self._idcol(meta), "=", args[0])], caller, many=False))
+            if hit is not None:  # кэш первого уровня: SQL не выполняется
+                return (
+                    JOpt(hit)
+                    if strip_generics(rt_full or "") == "Optional"
+                    else hit
+                )
+            return self._wrap(
+                rt_full,
+                self._find(
+                    meta,
+                    [(self._idcol(meta), "=", args[0])],
+                    caller,
+                    many=False,
+                ),
+            )
         if name == "existsById":
-            return len([r for r in meta.table.rows if r.get(self._idcol(meta)) == args[0]]) > 0 if self._touch_base(meta, caller) else False
+            return (
+                len(
+                    [
+                        r
+                        for r in meta.table.rows
+                        if r.get(self._idcol(meta)) == args[0]
+                    ]
+                )
+                > 0
+                if self._touch_base(meta, caller)
+                else False
+            )
         if name == "findAll":
             rows = self._select(meta, lambda r: True, caller)
             return self._wrap(rt_full, rows, many=True)
@@ -403,7 +544,9 @@ class Repos:
             return len(meta.table.rows)
         if name == "findAllById":
             ids = list(args[0])
-            rows = self._select(meta, lambda r: r.get(self._idcol(meta)) in ids, caller)
+            rows = self._select(
+                meta, lambda r: r.get(self._idcol(meta)) in ids, caller
+            )
             return self._wrap(rt_full, rows, many=True)
         # --- @Query
         if m is not None and "Query" in m.annots:
@@ -416,7 +559,11 @@ class Repos:
         return True
 
     def _decl(self, px, name, argc):
-        cands = [m for m in self.it.p.find_methods(px.ci, name) if len(m.params) == argc]
+        cands = [
+            m
+            for m in self.it.p.find_methods(px.ci, name)
+            if len(m.params) == argc
+        ]
         return cands[0] if cands else None
 
     def _id_of(self, meta, obj):
@@ -433,12 +580,13 @@ class Repos:
                 if not self._cmp(r.get(col), op, val):
                     return False
             return True
+
         rows = self._select(meta, pred, caller)
         return rows
 
     @staticmethod
     def _eq(a, b):
-        """Сравнение как в MySQL (utf8mb4_0900_ai_ci): строки без учёта регистра."""
+        """Сравнивает как MySQL (utf8mb4_0900_ai_ci): без учёта регистра."""
         if a is None or b is None:
             return a is None and b is None
         if a == b:
@@ -481,12 +629,10 @@ class Repos:
         return False
 
     def _wrap(self, rt_full, rows, many=None):
-        """Строки -> результат нужного вида (Optional / List / сущность)."""
-        meta_rows = rows
-        return ("ROWS", rt_full, meta_rows)
+        """Помечает строки результата для приведения к виду ``rt_full``."""
+        return ("ROWS", rt_full, rows)
 
     def _finish(self, meta, rt_full, rows, caller):
-        it = self.it
         rt = strip_generics(rt_full) if rt_full else ""
         if rt in ("long", "int", "Long", "Integer"):
             return len(rows)
@@ -497,7 +643,15 @@ class Repos:
         ents = [self.load(meta, r, caller) for r in rows]
         if rt == "Optional":
             return JOpt(ents[0] if ents else None)
-        if rt in ("List", "ArrayList", "Collection", "Iterable", "LinkedList", "Set", "HashSet"):
+        if rt in (
+            "List",
+            "ArrayList",
+            "Collection",
+            "Iterable",
+            "LinkedList",
+            "Set",
+            "HashSet",
+        ):
             return JList(ents)
         return ents[0] if ents else None
 
@@ -509,7 +663,7 @@ class Repos:
         self._touch_base(meta, caller)
         idf = meta.id_field
         if idf and (obj.f.get(idf) in (None, "")):
-            obj.f[idf] = fake_uuid()
+            obj.f[idf] = it.new_uuid()
         row = self.to_row(meta, obj)
         idc = self._idcol(meta)
         found = None
@@ -526,8 +680,17 @@ class Repos:
         self.it.session[(meta.table_name, row.get(idc))] = obj
         for c in meta.colls:
             coll = obj.f.get(c["field"])
-            vals = list(coll) if isinstance(coll, (list, dict)) and coll is not None and not isinstance(coll, LazyColl) else (
-                list(super(LazyColl, coll).__iter__()) if isinstance(coll, LazyColl) else [])
+            vals = (
+                list(coll)
+                if isinstance(coll, (list, dict))
+                and coll is not None
+                and not isinstance(coll, LazyColl)
+                else (
+                    list(super(LazyColl, coll).__iter__())
+                    if isinstance(coll, LazyColl)
+                    else []
+                )
+            )
             if isinstance(coll, JSet):
                 vals = list(coll.values())
             tbl = c["table"]
@@ -535,7 +698,9 @@ class Repos:
                 continue
             if vals or found is not None:
                 self.touch(caller, c["node"])
-            tbl.rows[:] = [r for r in tbl.rows if r.get(c["join"]) != row.get(idc)]
+            tbl.rows[:] = [
+                r for r in tbl.rows if r.get(c["join"]) != row.get(idc)
+            ]
             for i, v in enumerate(vals):
                 r = {k: None for k in tbl.cols}
                 r[c["join"]] = row.get(idc)
@@ -547,7 +712,11 @@ class Repos:
                     for sf in it.p.all_fields(eci):
                         r[snake(sf.name)] = v.f.get(sf.name)
                 else:
-                    vc = [k for k in tbl.cols if k != c["join"] and not k.endswith("_order")]
+                    vc = [
+                        k
+                        for k in tbl.cols
+                        if k != c["join"] and not k.endswith("_order")
+                    ]
                     if vc:
                         r[vc[0]] = v
                 tbl.rows.append(r)
@@ -559,14 +728,18 @@ class Repos:
         for c in meta.colls:
             if c["table"] is not None:
                 self.touch(caller, c["node"])
-                c["table"].rows[:] = [r for r in c["table"].rows if r.get(c["join"]) not in ids]
-        meta.table.rows[:] = [r for r in meta.table.rows if r.get(idc) not in ids]
+                c["table"].rows[:] = [
+                    r for r in c["table"].rows if r.get(c["join"]) not in ids
+                ]
+        meta.table.rows[:] = [
+            r for r in meta.table.rows if r.get(idc) not in ids
+        ]
         for i in ids:
             self.it.session.pop((meta.table_name, i), None)
 
     # --- производные запросы
     def _derived(self, meta, name, args, caller, rt_full):
-        m = re.match(r"^(find|get|read|query|count|exists|delete|remove)(Distinct)?(First\d*|Top\d*)?(All)?(?:\w*?)By(.*)$", name)
+        m = DERIVED_QUERY.match(name)
         if not m:
             self.it.warn(f"repo? {name}")
             return UNK
@@ -592,28 +765,40 @@ class Repos:
                 if op in ("isnull", "notnull"):
                     clause.append((col, op, None))
                 elif op == "between":
-                    clause.append((col, op, (args[ai], args[ai + 1]))); ai += 2
+                    clause.append((col, op, (args[ai], args[ai + 1])))
+                    ai += 2
                 else:
-                    clause.append((col, op, args[ai] if ai < len(args) else None)); ai += 1
+                    clause.append(
+                        (col, op, args[ai] if ai < len(args) else None)
+                    )
+                    ai += 1
             parsed.append(clause)
 
         def pred(r):
-            for clause in parsed:      # parsed: список OR-групп из AND-условий
+            for clause in parsed:  # parsed: список OR-групп из AND-условий
                 if all(self._cmp_row(meta, r, c, o, v) for c, o, v in clause):
                     return True
             return False
+
         rows = self._select(meta, pred, caller)
         if order:
             mm = re.match(r"(.*?)(Asc|Desc)?$", order)
             col = self._prop_col(meta, mm.group(1))
             if col:
-                rows.sort(key=lambda r: (r.get(col) is None, r.get(col)), reverse=(mm.group(2) == "Desc"))
+                rows.sort(
+                    key=lambda r: (r.get(col) is None, r.get(col)),
+                    reverse=(mm.group(2) == "Desc"),
+                )
         if limit:
             rows = rows[:limit]
         if verb in ("delete", "remove"):
             ids = [r.get(self._idcol(meta)) for r in rows]
             self._delete_rows(meta, ids, caller)
-            return len(ids) if strip_generics(rt_full or "") in ("long", "int") else None
+            return (
+                len(ids)
+                if strip_generics(rt_full or "") in ("long", "int")
+                else None
+            )
         if verb == "count":
             return len(rows)
         if verb == "exists":
@@ -621,7 +806,8 @@ class Repos:
         return self._finish(meta, rt_full, rows, caller)
 
     def _cmp_row(self, meta, r, col, op, val):
-        # встроенные поля: колонка может принадлежать embedded-типу; val может быть объектом TripId
+        # встроенные поля: колонка может принадлежать embedded-типу; val может
+        # быть объектом TripId
         if isinstance(val, JObj) and col.startswith("@emb:"):
             for sf, sv in val.f.items():
                 c2 = snake(sf)
@@ -637,11 +823,30 @@ class Repos:
             val = list(val.values())
         return self._cmp(r.get(col), op, val)
 
-    OPS = [("IsNotNull", "notnull"), ("NotNull", "notnull"), ("IsNull", "isnull"), ("Null", "isnull"),
-           ("NotIn", "not in"), ("In", "in"), ("Containing", "contains"), ("Contains", "contains"),
-           ("StartingWith", "starts"), ("EndingWith", "ends"), ("Like", "like"), ("GreaterThanEqual", ">="),
-           ("LessThanEqual", "<="), ("GreaterThan", ">"), ("LessThan", "<"), ("After", ">"), ("Before", "<"),
-           ("Between", "between"), ("Not", "!="), ("IsNot", "!="), ("Is", "="), ("Equals", "=")]
+    OPS = [
+        ("IsNotNull", "notnull"),
+        ("NotNull", "notnull"),
+        ("IsNull", "isnull"),
+        ("Null", "isnull"),
+        ("NotIn", "not in"),
+        ("In", "in"),
+        ("Containing", "contains"),
+        ("Contains", "contains"),
+        ("StartingWith", "starts"),
+        ("EndingWith", "ends"),
+        ("Like", "like"),
+        ("GreaterThanEqual", ">="),
+        ("LessThanEqual", "<="),
+        ("GreaterThan", ">"),
+        ("LessThan", "<"),
+        ("After", ">"),
+        ("Before", "<"),
+        ("Between", "between"),
+        ("Not", "!="),
+        ("IsNot", "!="),
+        ("Is", "="),
+        ("Equals", "="),
+    ]
 
     def _parse_conds(self, meta, s):
         groups = []
@@ -652,11 +857,12 @@ class Repos:
                     continue
                 ic = False
                 if andpart.endswith("IgnoreCase"):
-                    andpart = andpart[:-10]; ic = True
+                    andpart = andpart[:-10]
+                    ic = True
                 op = "="
                 for suf, o in self.OPS:
                     if andpart.endswith(suf) and andpart != suf:
-                        prop = andpart[:-len(suf)]
+                        prop = andpart[: -len(suf)]
                         if self._prop_col(meta, prop):
                             op, andpart = o, prop
                             break
@@ -678,7 +884,7 @@ class Repos:
             if fname == lp:
                 return "@emb:" + fname
             if prop.startswith(fname[0].upper() + fname[1:]):
-                rest = prop[len(fname):]
+                rest = prop[len(fname) :]
                 for sf in self.it.p.all_fields(eci):
                     if sf.name == rest[0].lower() + rest[1:]:
                         return snake(sf.name)
@@ -697,12 +903,23 @@ class Repos:
                 if not pm:
                     self.it.warn("native cond?")
                     return UNK
-                conds.append((pm.group(1), pm.group(2).lower(), args[int(pm.group(3)) - 1]))
-        rows = self._select(meta, lambda r: all(self._cmp(r.get(c), o, v) for c, o, v in conds), caller)
+                conds.append(
+                    (
+                        pm.group(1),
+                        pm.group(2).lower(),
+                        args[int(pm.group(3)) - 1],
+                    )
+                )
+        rows = self._select(
+            meta,
+            lambda r: all(self._cmp(r.get(c), o, v) for c, o, v in conds),
+            caller,
+        )
         return self._finish(meta, rt_full, rows, caller)
 
 
 def hk_(x):
+    """Возвращает ключ для хеш-таблицы: само значение или его ``id``."""
     try:
         hash(x)
         return x
