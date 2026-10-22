@@ -1,4 +1,6 @@
-"""Собирает solution.zip: код решения, тесты и submission.json.
+"""Собирает solution.zip для сдачи: код решения, описание и ответ.
+
+В архив не попадают тесты, отладочные инструменты и настройки разработки.
 
 Запуск::
 
@@ -9,29 +11,20 @@ import os
 import zipfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-TOP_FILES = (
-    "your_solution.py",
-    "SOLUTION.md",
-    "submission.json",
-    "pyproject.toml",
-    ".flake8",
-    "requirements-dev.txt",
-)
-PACKAGES = ("solution", "tests")
+TOP_FILES = ("your_solution.py", "SOLUTION.md", "submission.json")
+PACKAGE = "solution"
+EXCLUDED_DIRS = ("__pycache__", "tools")
 
 
 def collect_files():
     """Возвращает пути файлов архива относительно корня проекта."""
-    files = [f for f in TOP_FILES if os.path.exists(os.path.join(ROOT, f))]
-    for package in PACKAGES:
-        for dirpath, dirnames, filenames in os.walk(
-            os.path.join(ROOT, package)
-        ):
-            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
-            for name in filenames:
-                if not name.endswith(".pyc"):
-                    rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
-                    files.append(rel.replace(os.sep, "/"))
+    files = list(TOP_FILES)
+    for dirpath, dirnames, filenames in os.walk(os.path.join(ROOT, PACKAGE)):
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+        for name in filenames:
+            if name.endswith(".py"):
+                rel = os.path.relpath(os.path.join(dirpath, name), ROOT)
+                files.append(rel.replace(os.sep, "/"))
     return sorted(files)
 
 

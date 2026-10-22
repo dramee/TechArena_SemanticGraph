@@ -7,7 +7,6 @@
 """
 
 import argparse
-import collections
 import copy
 import glob
 import json
@@ -17,7 +16,6 @@ import threading
 import time
 import traceback
 
-from . import config as _cfg
 from . import db as dbm
 from .context import RunContext
 from .interp import Interp, OutOfFuel
@@ -39,7 +37,7 @@ FUEL_PER_STEP = 4_000_000
 DUMP_NAME = os.path.join("context", "db-after-warmup.sql.gz")
 
 
-def run_scenario(proj, tables0, scenario, verbose=False):
+def run_scenario(proj, tables0, scenario):
     """Выполняет сценарий на свежей копии БД.
 
     Шаги превращаются в HTTP-запросы, код сервисов интерпретируется.
@@ -73,8 +71,7 @@ def run_scenario(proj, tables0, scenario, verbose=False):
                     "".join(tail)[-420:],
                 )
             )
-    if _cfg.JACKSON_CTORS_WITH_CALLS:
-        merge_jackson_ctors(it)
+    merge_jackson_ctors(it)
     return it, client, errors
 
 
@@ -96,17 +93,15 @@ def merge_jackson_ctors(it):
 
 
 def apply_label_rules(tr):
-    """Применяет правила разметки эталона (см. ``config.py``).
+    """Применяет правила разметки эталона к конструкторам.
 
-    Возвращает множества ``executes`` и ``calls`` после правил.
+    Рёбра calls к конструкторам не ставятся, а сам конструктор попадает в
+    executes, только если вызывает методы проекта (Order#<init>). Возвращает
+    множества ``executes`` и ``calls`` после правил.
     """
-    calls = set(tr.calls)
-    if _cfg.DROP_CTOR_CALL_TARGETS:
-        calls = {c for c in calls if "#<init>" not in c[1]}
-    executes = set(tr.executes)
-    if _cfg.DROP_CTORS_WITHOUT_CALLS:
-        callers = {c[0] for c in calls}
-        executes = {m for m in executes if "#<init>" not in m or m in callers}
+    calls = {c for c in tr.calls if "#<init>" not in c[1]}
+    callers = {c[0] for c in calls}
+    executes = {m for m in tr.executes if "#<init>" not in m or m in callers}
     return executes, calls
 
 
@@ -169,23 +164,6 @@ def find_dump(explicit, skeleton_path):
     raise FileNotFoundError(f"не найден {DUMP_NAME} (укажите --dump)")
 
 
-def _print_verbose(it, client, errors):
-    for entry in client.log:
-        print("   ", entry)
-    for e in errors:
-        print("   ERR", e)
-    print("   warnings", dict(it.warnings))
-    for e in it.exc_log[:20]:
-        print("   EXC", e)
-    for e in it.auth_log[:20]:
-        print("   AUTH-DENIED", e)
-    decisions = collections.Counter(
-        (k[0].split("/")[-1], k[1], d, txt) for k, d, txt in it.decisions
-    )
-    for k, c in decisions.most_common(40):
-        print("   decision", k, c)
-
-
 def _parse_args(argv):
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -199,12 +177,6 @@ def _parse_args(argv):
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument(
         "--dump", default=None, help=f"SQL-дамп БД (по умолчанию {DUMP_NAME})"
-    )
-    ap.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="журнал запросов, предупреждений и решений",
     )
     args = ap.parse_args(argv)
     args.scenario = expand_paths(args.scenario)
@@ -226,13 +198,11 @@ def main(argv=None):
         scenario = load_json(path)
         sid = scenario.get("id") or os.path.splitext(os.path.basename(path))[0]
         try:
-            it, client, errors = run_scenario(
-                proj, tables0, scenario, args.verbose
-            )
+            it, _client, errors = run_scenario(proj, tables0, scenario)
             edges = to_edges(sid, it.trace, valid_methods, valid_tables)
         except Exception:
             traceback.print_exc()
-            it, client, errors, edges = None, None, [], []
+            it, errors, edges = None, [], []
         out["scenarios"][sid] = {"edges": edges}
         if it is None:
             continue
@@ -242,8 +212,6 @@ def main(argv=None):
             f"remote {len(tr.remote)} data {len(tr.data)}  "
             f"(ошибок интерпретатора: {len(errors)})"
         )
-        if args.verbose:
-            _print_verbose(it, client, errors)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False)
     print(f"готово за {time.time() - t0:.1f} с -> {args.out}")

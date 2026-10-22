@@ -6,13 +6,6 @@
 python3 your_solution.py skeleton/trainticket.json.gz targets/trainticket scenarios/*.json -o submission.json
 ```
 
-Сравнение с эталоном S0 и подробный журнал:
-
-```bash
-python3 -m solution.tools.compare submission.json gold/S0.json
-python3 your_solution.py skeleton/trainticket.json.gz targets/trainticket scenarios/S1.json -o out.json -v
-```
-
 Синтаксис совместим с Python 3.8; запуск проверен на 3.12, 3.14 и 3.15 с одинаковым результатом.
 
 ## Идея
@@ -51,9 +44,6 @@ Java-исходники проекта и «прогоняет» сценари�
 | `solution/jparse.py` | Токенизатор и разборщик Java 8; позиции вызовов совпадают с `call_site` скелета |
 | `solution/db.py` | Разбор дампа MySQL |
 | `solution/values.py` | Значения времени выполнения (объекты, коллекции, исключения, `UNK`) |
-| `solution/config.py` | Правила разметки эталона в виде флагов |
-| `solution/tools/` | Отладка: `flow`, `failing`, `dbdiff`, `handlers`, `trace_calls`, `missing_edges`, `compare`, `make_probe` |
-| `tests/` | Тесты pytest: эталон S0, подтверждённые ответы S1–S7, клиент, разборщик, все обработчики, CLI |
 
 ## Правила разметки эталона
 
@@ -98,18 +88,6 @@ Java-исходники проекта и «прогоняет» сценари�
 | --- | --- | --- | --- | --- | --- |
 | S0 (эталон) | 34 | 24 | 0 | 7 | **1.000** (baseline_nlp: 0.431) |
 | S1–S7 | 152–188 | 169–268 | 30–51 | 31–41 | **1.000** на платформе |
-
-## Разработка
-
-Инструменты разработки перечислены в `requirements-dev.txt`, настройки — в `pyproject.toml` и `.flake8`
-(PEP 8, строки до 79 символов, докстринги у всех публичных функций и классов):
-
-```bash
-pip install -r requirements-dev.txt
-isort . && black .
-flake8
-pytest
-```
 
 ## Ограничения и допущения
 

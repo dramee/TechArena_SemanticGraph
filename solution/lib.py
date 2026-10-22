@@ -7,7 +7,6 @@ import math
 import re
 from decimal import Decimal
 
-from . import config as _cfg
 from .values import (
     NOTFOUND,
     UNK,
@@ -365,12 +364,7 @@ def lombok_str(it, o):
     """
     ci = o.cls
     lombok = bool({"Data", "ToString", "Value"} & ci.annots.keys())
-    if (
-        not lombok
-        or it is None
-        or not _cfg.LOMBOK_TOSTRING_CALLS_GETTERS
-        or _STR_DEPTH[0] > 6
-    ):
+    if not lombok or it is None or _STR_DEPTH[0] > 6:
         return (
             ci.name
             + "("
@@ -1923,8 +1917,6 @@ def libobj_method(it, o, n, a, fr, node):
         if n == "writeValueAsString":
             s = JsonStr("{json}")
             s.obj = a[0]
-            if _cfg.TRACE_CLIENT_JSON:
-                it.web.to_raw(a[0], traced=True)
             return s
         if n == "readValue":
             src = a[0]
@@ -1940,7 +1932,7 @@ def libobj_method(it, o, n, a, fr, node):
                     ),
                     fr.cls if fr else None,
                     tgt.ci,
-                    traced=_cfg.TRACE_CLIENT_JSON,
+                    traced=False,
                 )
             if isinstance(tgt, LibObj) and tgt.kind == "PTR":
                 return it.web.convert(
@@ -1948,7 +1940,7 @@ def libobj_method(it, o, n, a, fr, node):
                     tgt.f["type"],
                     tgt.f.get("ctx"),
                     None,
-                    traced=_cfg.TRACE_CLIENT_JSON,
+                    traced=False,
                 )
             return val
         if n == "convertValue":
@@ -1963,7 +1955,7 @@ def libobj_method(it, o, n, a, fr, node):
                     ),
                     fr.cls if fr else None,
                     tgt.ci,
-                    traced=_cfg.TRACE_CLIENT_JSON,
+                    traced=False,
                 )
             if isinstance(tgt, LibObj) and tgt.kind == "PTR":
                 return it.web.convert(
@@ -1971,7 +1963,7 @@ def libobj_method(it, o, n, a, fr, node):
                     tgt.f["type"],
                     tgt.f.get("ctx"),
                     None,
-                    traced=_cfg.TRACE_CLIENT_JSON,
+                    traced=False,
                 )
             return a[0]
         return UNK

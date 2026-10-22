@@ -11,7 +11,6 @@ import itertools
 import random
 import re
 
-from . import config as _cfg
 from . import lib
 from .jparse import (
     ArrayLit,
@@ -262,7 +261,7 @@ class Interp:
             self.trace.calls.add((caller.id, callee.id))
 
     def warn(self, what):
-        """Считает предупреждение интерпретатора (для журнала ``-v``)."""
+        """Считает предупреждение интерпретатора."""
         self.warnings[what] += 1
 
     # ------------------------------------------------------------------------------------------
@@ -772,11 +771,11 @@ class Interp:
         если в его исходнике есть вызов с тем же именем.
         """
         r = self.invoke(mi, this, args, None)
-        if self.lombok_depth and _cfg.LOMBOK_BREAKS_CHAIN:
+        if self.lombok_depth:
             # между библиотекой и методом стоит сгенерированный Lombok метод
             # класса проекта: ребра calls нет
             return r
-        if _cfg.LIB_NAME_MATCH_EDGES and self.stack and not mi.ctor:
+        if self.stack and not mi.ctor:
             f = self.stack[-1].method
             if f is not None and mi.name in called_names(f):
                 self.rec_call(f, mi)

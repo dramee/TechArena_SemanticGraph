@@ -9,7 +9,6 @@ RabbitMQ.
 import collections
 import re
 
-from . import config as _cfg
 from . import lib
 from .lib import UNK_CH, has_unk, to_str
 from .model import PRIM_DEFAULT, strip_generics, type_args
@@ -513,9 +512,7 @@ class Web:
         elif ent is not None and ent is not UNK:
             body = ent
         raw_body = (
-            self.to_raw(body, traced=_cfg.TRACE_CLIENT_JSON)
-            if body is not None
-            else None
+            self.to_raw(body, traced=False) if body is not None else None
         )
         hdrs = (
             ent.f.get("headers")
@@ -541,9 +538,7 @@ class Web:
         else:
             tn, ci, ctx = self.rtype_info(rtype)
             result = (
-                self.convert(
-                    resp.f["body"], tn, ctx, ci, traced=_cfg.TRACE_CLIENT_JSON
-                )
+                self.convert(resp.f["body"], tn, ctx, ci, traced=False)
                 if tn
                 else resp.f["body"]
             )

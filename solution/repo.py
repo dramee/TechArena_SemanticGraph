@@ -8,7 +8,6 @@
 
 import re
 
-from . import config as _cfg
 from .model import PRIM_DEFAULT, strip_generics, type_args
 from .values import UNK, JEnum, JList, JObj, JOpt, JSet
 
@@ -407,15 +406,7 @@ class Repos:
         if it.web is not None and it.web.in_serialization:
             # Jackson читает коллекцию после возврата из метода проекта: в
             # эталоне такой SQL ни к какому методу не относится
-            return (
-                None
-                if _cfg.DROP_SERIALIZATION_LAZY_SQL
-                else (
-                    obj.tag.get("loader")
-                    if isinstance(obj.tag, dict)
-                    else None
-                )
-            )
+            return None
         for fr in reversed(it.stack):
             if (
                 fr.method is not None
